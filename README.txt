@@ -19,7 +19,7 @@ generated_data (folder)
 ######
 data (folder)
 
-	folder where the raw data should be saved. Note that while Pew and election returns are publicly available, they require a simple free login bypass to download. Users are thus required to download Pew and election returns manually to this folder.
+	folder where the raw data should be saved. Running data_prep_rep.R will download the publically available CCES data to this folder. Note that while Pew and election returns are also publicly available, their download can not be automated. Instead, they require a simple free login bypass to download. Users are thus required to download Pew and election returns manually to this folder. Detailed instructions on how to do so are in data_prep_rep.R
 
 ######	
 app_kpop_run.R
