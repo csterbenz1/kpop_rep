@@ -1,0 +1,2393 @@
+---
+title:  "2016 Application Results"
+author: "Ciara Sterbenz"
+date: '2023-04-03'
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = F, echo = F}
+#rm(list = ls())
+#knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+set.seed(9345876)
+
+### Packages
+library(tidyverse)
+library(survey)
+library(kbal)
+library(knitr)
+library(kableExtra)
+#loading the updated data:
+path_weights = paste0(getwd(), "/weights/")
+path_data= paste0(getwd(), "/generated_data/")
+#if rerun app_kpop_run.R to save new weights, change filename here
+weights_file = "app_update_june2023-06-28.Rdata"
+allB_weights_file = "app_allBPOPW_2023-07-01.Rdata"
+#flag for whether weighting estimators weight to the weighted CCES population or not
+#(the above weight files are with population weights only and kpop would need to be rerun without them so this must remain true with the attached weight files)
+POPW = TRUE
+```
+
+The following .Rmd is written with an eye more toward running inline in Rstudio. As such, the knitted pdf may have some slight formatting issues and the authors recommend an interested replicator examin the results of the application in that format.
+
+
+```{r load_dat, echo = F}
+working_path = getwd()
+#NB: can use manually generated data from data_prep_rep.R which should be named "cces_prepared.rds" and "pew_prepared.rds." #Below uses the original prepared data "cces_prepared_orig.rds" and "pew_prepared_orig.rds" used by the authors.
+path_data= paste0(working_path, "/generated_data/")
+cces <- readRDS(paste0(path_data, "cces_prepared_orig.rds"))
+pew <- readRDS(paste0(path_data, "pew_prepared_orig.rds"))
+```
+
+
+```{r SE_funct, echo = F}
+## Variance functions
+var_fixed <- function(Y, weights, pop_size) {
+    ## note: needs weights that sum to population total
+    if(round(sum(weights)) != pop_size) { weights = weights*pop_size/sum(weights)}
+    return(Hmisc::wtd.var(Y, weights))
+}
+
+## kott (14) (under poisson)
+var_quasi <- function(weights, residuals, pop_size) {
+    #moving from kott 14 w sum w =N to weights that sum to 1 + var of total to var of mean:
+    #sum^n (w_i^2 - 1/N_pop w_i)e_i^2 
+    return(sum((weights^2 - (weights / pop_size))*residuals^2))
+}
+
+## kott (15) linearization
+var_linear <- function(weights, residuals, sample_size) {
+    #moving from kott 14 w sum w =N to weights that sum to 1 + var of total to var of mean:
+    # n/(n-1) sum^n (w_i*e_i)^2 - (1/n-1) [sum^n] *using this for now
+    # approx = sum^n (w_i*e_i)^2 - (1/n) [sum^n]
+    n = sample_size
+    return((n/(n-1))*sum((weights * residuals)^2) - 1/(n-1) * sum(weights * residuals)^2)
+}
+
+## chad
+var_chad <- function(weights, residuals) {
+    return(sum(weights^2 * residuals^2))
+}
+
+## calculate all variances
+calc_SEs <- function(Y, residuals, pop_size, weights, sample_size) {
+    if(round(sum(weights)) != 1 ) {
+        weights = weights/sum(weights)
+    }
+    return(data.frame(SE_fixed = sqrt(var_fixed(Y, weights, pop_size) / length(Y)),
+                      SE_quasi = sqrt(var_quasi(weights, residuals, pop_size)),
+                      SE_linear = sqrt(var_linear(weights, residuals, sample_size)),
+                      SE_chad = sqrt(var_chad(weights, residuals))))
+}
+
+```
+
+
+```{r setup_targets, echo = F}
+formula_rake_demos_noeduc <- ~recode_age_bucket + recode_female + recode_race + 
+    recode_region + recode_pid_3way
+
+formula_rake_demos_weduc <- ~recode_age_bucket + recode_female + 
+    recode_race + recode_region + recode_educ + recode_pid_3way
+
+formula_rake_all_vars <- ~recode_age_bucket + recode_female + 
+    recode_race + recode_region + recode_pid_3way + recode_educ +
+    recode_income_5way + recode_relig_6way + recode_born + recode_attndch_4way
+
+formula_ps_reduc <- ~recode_age_3way + 
+    recode_female + 
+    recode_race + 
+    recode_region + 
+    recode_pid_3way  +
+    recode_income_3way + 
+    recode_born +
+    recode_educ_wh_3way 
+
+formula_ps_all <- ~recode_age_bucket +
+    recode_female +
+    recode_race +
+    recode_region +
+    recode_pid_3way +
+    recode_income_5way +
+    recode_born +
+    recode_educ +
+    recode_relig_6way +
+     recode_attndch_4way
+formula_retrospective <- ~recode_age_bucket:recode_pid_3way + 
+    recode_female:recode_pid_3way+ recode_race_reg_wh_educ:recode_pid_3way
+
+### set up some functions for convenient estimates
+vote_contrast <- quote((recode_vote_2016Democrat - recode_vote_2016Republican) /
+                               (recode_vote_2016Democrat + recode_vote_2016Republican))
+
+vote_diff <- quote((recode_vote_2016Democrat - recode_vote_2016Republican) /(recode_vote_2016Democrat + recode_vote_2016Republican + recode_vote_2016Other)) 
+
+#### Build Strata For PS
+cces <- bind_cols(cces, cces %>% 
+                         unite("strata_reduc", all.vars(formula_ps_reduc), 
+                               remove = FALSE) %>%
+                         unite("strata_all", all.vars(formula_ps_all)) %>%
+                      dplyr::select(strata_reduc, strata_all))
+
+pew <- bind_cols(pew, pew %>% 
+                     unite("strata_reduc", all.vars(formula_ps_reduc), 
+                           remove = FALSE) %>%
+                     unite("strata_all", all.vars(formula_ps_all)) %>%
+                     dplyr::select(strata_reduc, strata_all))
+
+#make targets
+create_targets <- function (target_design, target_formula) {
+    target_mf <- model.frame(target_formula, model.frame(target_design))
+    target_mm <- model.matrix(target_formula, target_mf)
+    wts <- weights(target_design)
+    colSums(target_mm * wts) / sum(wts)
+}
+
+```
+
+
+# Weights Diagnostics
+
+Produces Figure C.2 and Table C.4 in Appendix C.
+
+```{r weights, echo = F, include = F, warning= F, messages =F}
+load(paste0(path_weights,weights_file))
+
+cces_awt <- svydesign(~1, weights = ~commonweight_vv_post, data = cces)
+pew_nowt <- suppressWarnings(svydesign(~1, data = pew))
+
+#post stratification
+missing_strata_reduc <- unique(cces$strata_reduc)[!(unique(cces$strata_reduc) %in%
+                                            unique(pew$strata_reduc))]
+problem_reduc <- unique(pew$strata_reduc)[!(unique(pew$strata_reduc)
+                                                         %in%
+                                                   unique(cces$strata_reduc))]
+
+targets_rake_demos_noeduc <- create_targets(cces_awt,
+                                                    formula_rake_demos_noeduc)
+targets_rake_demos_weduc <- create_targets(cces_awt, formula_rake_demos_weduc)
+targets_rake_all_vars <- create_targets(cces_awt, 
+                                               formula_rake_all_vars)
+targets_retrospective <- create_targets(cces_awt, formula_retrospective)
+targets_ps_reduc <- svytable(formula = ~strata_reduc,
+                       design = subset(cces_awt, !(strata_reduc %in%
+                                                        missing_strata_reduc)))
+
+rake_demos_noeduc <- calibrate(design = pew_nowt,
+                           formula = formula_rake_demos_noeduc,
+                           population = targets_rake_demos_noeduc,
+                           calfun = "raking")
+
+rake_demos_weduc <- calibrate(design = pew_nowt,
+                          formula = formula_rake_demos_weduc,
+                          population = targets_rake_demos_weduc,
+                          calfun = "raking")
+
+rake_all_vars <- calibrate(design = pew_nowt,
+                          formula = formula_rake_all_vars,
+                          population = targets_rake_all_vars,
+                          calfun = "raking")
+
+rake_retrospective <- calibrate(design = pew_nowt,
+                            formula = formula_retrospective,
+                            population = targets_retrospective,
+                            calfun = "raking",
+                            force = TRUE)
+
+#reduced
+pew_ps_reduc <- suppressWarnings(svydesign(ids = ~1, data = pew %>% 
+                              filter(!(strata_reduc %in% problem_reduc))))
+post_strat_reduc <- postStratify(design = pew_ps_reduc,
+                                strata = ~strata_reduc,
+                                population = targets_ps_reduc)
+
+n_samp = nrow(pew)
+
+weights_bmaxvar <- data.frame(kpop_w = out$weights$kpop_w,
+                              kpop_demos_w = out$weights$kpop_demos_w,
+                              kpop_demos_edu_w = out$weights$kpop_demos_wedu_w,
+                              kpop_all_w = out$weights$kpop_all_w,
+                              rake_demos = weights(rake_demos_noeduc)[1:n_samp]/mean( weights(rake_demos_noeduc)[1:n_samp]),
+                              rake_demos_wedu = weights(rake_demos_weduc)[1:n_samp]/mean(weights(rake_demos_weduc)[1:n_samp]),
+                              rake_all = weights(rake_all_vars)[1:n_samp]/mean(weights(rake_demos_weduc)[1:n_samp]),
+                              ps_reduced = (weights(post_strat_reduc)*n_samp/sum(weights(post_strat_reduc)))[1:n_samp] )
+
+##### Effective sample size: Kish's eff
+#n_eff = n/ (mean(w^2) / mean(w)^2) = (sum w)^2 / sum(w^2)
+n_eff <- apply(weights_bmaxvar, 2, function(x) {
+    #to drop the ps weights
+    x <- na.omit(x)
+    sum(x)^2 / sum(x^2)
+})
+cat("Effective Sample Size (Kish) \n")
+n_eff
+
+
+####### How many units to get 90% of the sum of the weights from biggest to smallest
+#have to do ps manually because of the NAs in ps
+sorted <- apply(weights_bmaxvar[,-8], 2, function(x) sort(x, decreasing =T))
+#manually go back and add ps with NAs at the end so we get the right ordering
+sorted <- cbind(sorted, c(sort(na.omit(weights_bmaxvar[,8]), decreasing = T),
+                          rep(NA, sum(is.na(weights_bmaxvar$ps_reduced))))   )
+
+sum_90perc <- matrix(NA, ncol(sorted), nrow =1 )
+#old school nested loop
+for(j in 1:ncol(sorted)) {
+    for(i in 1:nrow(sorted)) {
+        if( sum(sorted[c(1:i), j]) >= .9*n_samp) {
+            stop_index = i
+            break
+        }
+    }
+    sum_90perc[1,j] <- i  
+}
+colnames(sum_90perc) <- c("kpop", "kpop demos", "kpop demos+edu", "kpop all", "rake demos",
+                          "rake demos+edu", "rake all", "PS")
+cat("How many units must we sum the weights of from biggest to smallest to get 90%\nof the total sum of the weights?")
+sum_90perc
+
+
+###### Output Results
+#Put all this information together
+numerical_dist_w <- data.frame(Variance = round(apply(weights_bmaxvar, 2, var, na.rm =T),2 ),  
+                               Max = round(apply(weights_bmaxvar, 2, max, na.rm =T),2),
+                               Min = round(apply(weights_bmaxvar, 2, min, na.rm =T),4),
+                               IQR = round(apply(weights_bmaxvar, 2, IQR, na.rm =T),2),
+                               Effective_SS = round(n_eff),
+                               sum_90perc = as.numeric(sum_90perc))
+rownames(numerical_dist_w) <- c("kpop",
+                    "kpop+MF: (demos)",
+                    "kpop+MF: (d+edu)",
+                    "kpop+MF: (all)",
+                   "mean calibration: (demos)",
+                   "mean calibration: (d+edu)",
+                   "mean calibration: (all)",
+                   "post-stratification: (reduced)")
+
+#table C.4 in appendix C
+weights_dist_table = kable(numerical_dist_w, format = "latex", booktabs = TRUE, #digits =2,
+      col.names = c("Variance", "Max", "Min", "IQR", "Effective SS (Kish)",
+                    "No. Units to 90% Sum of Total"),
+      caption = "Numerical Summary of Distribution of Survey Weights"
+      )
+
+
+### full faceted ggplot
+#ugly data wrangling for ggpolot
+weights_gg <- c(weights_bmaxvar[,1], 
+                    weights_bmaxvar[,2], 
+                    weights_bmaxvar[,3], 
+                    weights_bmaxvar[,4], 
+                    weights_bmaxvar[,5], 
+                    weights_bmaxvar[,6], 
+                    weights_bmaxvar[,7], 
+                    weights_bmaxvar[,8])
+weights_gg <- data.frame(weight = weights_gg,
+                         Method = c(rep("kpop", n_samp),
+                                    rep("kpop+mf: (demos)", n_samp),
+                                    rep("kpop+mf: (d+edu)", n_samp),
+                                    rep("kpop+mf: (all)", n_samp),
+                                    rep("mean calibration: (demos)", n_samp),
+                                    rep("mean calibration: (d+edu)", n_samp),
+                                    rep("mean calibration: (all)", n_samp),
+                                    rep("post-stratification (reduced)", n_samp)),
+                         binary_method = c(rep("kpop", 4*n_samp),
+                                           rep("mean calibration", 3*n_samp),
+                                           rep("post-stratification", n_samp)))
+ 
+weights_gg <- weights_gg %>% mutate(top_90 = c(rep(c(sorted[sum_90perc[1],1],
+                                                   sorted[sum_90perc[2],2],
+                                                   sorted[sum_90perc[3],3],
+                                                   sorted[sum_90perc[4],4],
+                                                   sorted[sum_90perc[5],5],
+                                                   sorted[sum_90perc[6],6],
+                                                   sorted[sum_90perc[7],7],
+                                                   sorted[sum_90perc[8],8]), each = n_samp)))
+
+
+dist_w <- ggplot(weights_gg) + 
+    geom_density(aes(x = weight, color = Method)) + 
+    geom_vline(aes(xintercept = top_90, color = Method)) +
+    facet_grid(rows = vars(binary_method),  scales = "free_x", space = "free_x") +
+    scale_color_brewer(palette="Paired") +
+    xlim(0,7) + 
+    theme_bw()
+#plot C.2 in Appendix C
+#dist_w
+#ggsave(dist_w, file = "/Users/Ciara_1/Dropbox/kpop/2023/application/plots/dist_w_close.pdf", height = 6, width = 10)
+
+
+###quickly look at the correlation bewteen weights and the outcome to see how the var is so reduced?
+sort(apply(weights_bmaxvar, 2, function(x) cor(na.omit(x), pew$diff_cces_on_pew[!is.na(x)] ) ))
+
+```
+
+
+Table C.4  and Figure C.2 in Appendix C.4
+```{r table_c4, echo = F, warning= F, messages =F}
+weights_dist_table
+dist_w
+
+```
+
+# L1 and BiasBound
+
+Produces Table C.5 in Appendix C
+
+```{r L1_bb, echo = F, include =F}
+l1 = t(as.matrix(out$est[,grepl("l1", colnames(out$est))]))
+bbr= t(as.matrix(out$est[,grepl("bbr", colnames(out$est))]))
+bbopt = t(as.matrix(out$est[,grepl("bb", colnames(out$est)) & !grepl("bbr", colnames(out$est))]))
+bborig = bbr*bbopt
+
+l1_bb_out = cbind(l1_orig = l1[1,1],
+                  l1_opt = l1[-1,1], 
+                  bb_orig = bborig, 
+                  bb_opt = bbopt,
+                  bbr = bbr)
+
+rownames(l1_bb_out) = c("kpop", "kpop conv", "kpop+amf",
+                        "kpop+mf: (demos)", "kpop+mf: (d+edu)", "kpop+mf: (all)")
+
+colnames(l1_bb_out)= c("L1 Original", "L1 Optimal", "Biasbound Original",
+                       "Biasbound Optimal", "Biasbound Ratio")
+                       
+l1_bb_out = l1_bb_out[-which(rownames(l1_bb_out) %in% c("kpop conv", "kpop+amf")),]
+#Table C.5 in appendix C
+kable_l1 = kable(l1_bb_out, format = "latex", booktabs = TRUE, digits =4,
+      caption = "L1 and Biasbound Results for all kpop Methods in 2016 Election Application"
+      )
+```
+
+```{r l1_table, echo =F}
+kable_l1
+```
+
+
+# Results: Main Plots + Margins
+
+```{r res_main_funct, echo = F}
+main_res_plot <- function(target = "modeled vote choice",
+                          weights_file,
+                          specify_nonkpop = c("cces orig", "cces mod", 
+                                              "unweighted",
+                                              "rake demos_noeduc", 
+                                              "rake demos_weduc",
+                                              "rake all_vars",
+                                             "post strat_reduc",
+                                             #post strat_all"
+                                             "rake retrospective"),
+                          specify_kpop = c("kpop", 
+                                           "kpop demos_mf", "kpop demos_wedu_mf","kpop all_mf"), 
+                          margins_formula = NULL,
+                          margins_formula_cces = NULL,
+                          eval_margins = TRUE,
+                          margins_pop_weighted_avg = TRUE,
+                          margins_var_order = NULL) {
+    if(target == "true vote choice") {
+        target = "CCES Orig"
+    } else if(target == "modeled vote choice") {
+        target = "CCES Modeled"
+    }
+    
+    pew_nowt <- suppressWarnings(svydesign(ids = ~1, data = pew))
+    pew_awt <- suppressWarnings(svydesign(ids = ~1, weights = ~weight, data = pew))
+
+    missing_strata_reduc <- unique(cces$strata_reduc)[!(unique(cces$strata_reduc) %in%
+                                                unique(pew$strata_reduc))]
+  
+    missing_strata_all <- unique(cces$strata_all)[!(unique(cces$strata_all) %in%
+                                                unique(pew$strata_all))]
+    
+    problem_reduc <- unique(pew$strata_reduc)[!(unique(pew$strata_reduc)
+                                                         %in%
+                                                   unique(cces$strata_reduc))]
+    
+    problem_all <- unique(pew$strata_all)[!(unique(pew$strata_all) %in%
+                                                   unique(cces$strata_all))]
+    
+    kbal_data_sampled <- c(rep(1, nrow(pew)),
+                           rep(0, nrow(cces)))
+
+
+    load(paste0(path_weights,weights_file))
+    cat(paste0("loading weights w: maxit=", maxit," tolerance=", tolerance," b=", 
+               round(out$est$b_out,3)," popweights=", POPW,"\n from file ",
+               weights_file,"\n"))
+    b = out$est$b_out
+    kpop_w <- out$weights$kpop_w
+    kpop_conv_w <- out$weights$kpop_w_conv
+    kpop_demos_w <- out$weights$kpop_demos_w
+    kpop_demos_wedu_w <- out$weights$kpop_demos_wedu_w
+    kpop_all_w <- out$weights$kpop_all_w
+
+    b_lab = paste0("b=", round(b, 2))
+    plot_b_lab = c("b=argmax V(K)")
+    
+    cces_svy <- svydesign(ids = ~1, weights = ~commonweight_vv_post,
+                      data = cces)
+
+    targets_rake_demos_noeduc <- create_targets(cces_svy,
+                                                    formula_rake_demos_noeduc)
+     targets_rake_demos_weduc <- create_targets(cces_svy, formula_rake_demos_weduc)
+     targets_rake_all_vars <- create_targets(cces_svy, 
+                                                       formula_rake_all_vars)
+     targets_retrospective <- create_targets(cces_svy, formula_retrospective)
+     
+     targets_ps_reduc <- svytable(formula = ~strata_reduc,
+                               design = subset(cces_svy, !(strata_reduc %in%
+                                                                missing_strata_reduc)))
+     targets_ps_all <- svytable(formula = ~strata_all,
+                               design = subset(cces_svy, !(strata_all %in%
+                                                                missing_strata_all)))
+     
+     rake_demos_noeduc <- calibrate(design = pew_nowt,
+                                   formula = formula_rake_demos_noeduc,
+                                   population = targets_rake_demos_noeduc,
+                                   calfun = "raking")
+     #doing this means svy doesnt know where the weights come from cn do linearization SEs, 
+     #instead uses much larger HT SEs
+     #rake_demos_noeduc <- svydesign(~1, data = pew, 
+     #                               weights = weights(rake_demos_noeduc))
+    
+     rake_demos_weduc <- calibrate(design = pew_nowt,
+                                  formula = formula_rake_demos_weduc,
+                                  population = targets_rake_demos_weduc,
+                                  calfun = "raking")
+
+     rake_all_vars <- calibrate(design = pew_nowt,
+                                  formula = formula_rake_all_vars,
+                                  population = targets_rake_all_vars,
+                                  calfun = "raking")
+ 
+    #post stratification
+    #reduced
+    pew_ps_reduc <- suppressWarnings(svydesign(ids = ~1, data = pew %>% 
+                                      filter(!(strata_reduc %in% problem_reduc))))
+    post_strat_reduc <- postStratify(design = pew_ps_reduc,
+                                        strata = ~strata_reduc,
+                                        population = targets_ps_reduc)
+    
+    n_reduc_drop =  cces %>% filter(strata_reduc %in% missing_strata_reduc) %>% count() %>% pull()
+    #percent of strata dropped 
+    n_problem_reduc_drop = pew %>% filter(strata_reduc %in% problem_reduc) %>% count() %>% pull()
+    if("post strat_reduc" %in% specify_nonkpop) {
+         cat(paste("PS (reduc) drops",n_reduc_drop, 
+              "units or", round(n_reduc_drop/nrow(cces)*100, 2), "% of CCES units",
+              "or", round(cces %>% filter(strata_reduc %in% missing_strata_reduc) %>% summarize(n_distinct(strata_reduc)) %>%
+        pull()/n_distinct(cces$strata_reduc)*100, 2), "% of CCES strata_reduc\n", 
+              "and", n_problem_reduc_drop, "or", round(n_problem_reduc_drop/nrow(pew)*100,2), "%\ of pew units\n") )
+    }
+    
+    pew_ps_all <- suppressWarnings(svydesign(ids = ~1,  data = pew %>%
+                                    filter(!(strata_all %in% problem_all))))
+    post_strat_all <- postStratify(design = pew_ps_all,
+                                        strata = ~strata_all,
+                                        population = targets_ps_all)
+    
+    n_all_drop =  cces %>% filter(strata_all %in%missing_strata_all) %>% count() %>% pull()
+    #percent of strata dropped 
+    cces %>% filter(strata_all %in% missing_strata_all) %>% summarize(n_distinct(strata_all)) %>%
+        pull()/n_distinct(cces$strata_all)
+    
+    n_problem_all_drop = pew %>% filter(strata_all %in% problem_all) %>% count() %>% pull()
+    if("post strat_all" %in% specify_nonkpop) {
+        cat(paste("PS (all) drops",n_all_drop,
+              "units or", round(n_all_drop/nrow(cces)*100, 2), "% of CCES units",
+              "or", round(cces %>% filter(strata_all %in% missing_strata_all) %>% summarize(n_distinct(strata_all)) %>%
+        pull()/n_distinct(cces$strata_all)*100, 2), "% of CCES strata_all\n",
+              "and", n_problem_all_drop, "or", round(n_problem_all_drop/nrow(pew)*100,2), "%\ of pew units\n") )
+    }
+    rake_retrospective <- suppressWarnings(calibrate(design = pew_nowt,
+                                    formula = formula_retrospective,
+                                    population = targets_retrospective,
+                                    calfun = "raking",
+                                    force = TRUE))
+
+    # kpop
+    kpop <- svydesign(~1, data = pew,
+                weights = kpop_w)
+
+    kpop_conv <- svydesign(~1, data = pew,
+                               weights = kpop_conv_w)
+
+    kpop_demos <-  svydesign(~1, data = pew,
+                          weights = kpop_demos_w)
+    
+    kpop_demos_wedu <-  svydesign(~1, data = pew,
+                          weights = kpop_demos_wedu_w)
+     
+    kpop_all <-  svydesign(~1, data = pew,
+                          weights = kpop_all_w)
+    
+    ################################# Margins #################################
+    if(eval_margins) { 
+        if(is.null(margins_formula)) {
+                margins_formula <- ~recode_vote_2016 +
+                    mod_cces_on_pew_pD + mod_cces_on_pew_pR + mod_cces_on_pew_pO +
+                    recode_pid_3way + 
+                    recode_female +  recode_age_bucket + recode_race +recode_region + recode_educ +recode_relig_6way+
+                    recode_born + recode_attndch_4way + recode_income_5way +
+                    recode_educ_pid +
+                    recode_pid_race + 
+                    recode_educ_pid_race +
+                    recode_race_educ_reg + 
+                    recode_educ_wh_3way + 
+                    recode_midwest_wh_edu + 
+                    recode_midwest_edu_race
+                
+              margins_formula_cces <- ~recode_vote_2016 +
+                    mod_cces_on_cces_pD + mod_cces_on_cces_pR + mod_cces_on_cces_pO +
+                    recode_pid_3way + 
+                    recode_female +  recode_age_bucket + recode_race +recode_region + recode_educ +recode_relig_6way+
+                    recode_born + recode_attndch_4way + recode_income_5way +
+                    recode_educ_pid +
+                    recode_pid_race + 
+                    recode_educ_pid_race +
+                    recode_race_educ_reg + 
+                    recode_educ_wh_3way + 
+                    recode_midwest_wh_edu + 
+                    recode_midwest_edu_race 
+        } else {
+            if(is.null(margins_var_order)) { stop("Must specify a row order for the margins table in \"margins_var_order\" if manually specify a margins forumla in \"margins_formula\" argument ")}
+        }
+        
+        margins <- round(cbind(
+            pew = svymean(margins_formula, pew_nowt),
+            cces_margins = svymean(margins_formula_cces, cces_svy, 
+                                   na.rm =  TRUE),
+            kpop = svymean(margins_formula, kpop),
+            kpop_conv = svymean(margins_formula, kpop_conv),
+            kpop_demos = svymean(margins_formula, kpop_demos),
+            kpop_demos_wedu = svymean(margins_formula, kpop_demos_wedu),
+            kpop_all = svymean(margins_formula, kpop_all),
+            rake_demos_noeduc = svymean(margins_formula, rake_demos_noeduc),
+            rake_demos_weduc = svymean(margins_formula, rake_demos_weduc),
+            rake_all_vars = svymean(margins_formula, rake_all_vars),
+            post_strat_reduc = svymean(margins_formula, post_strat_reduc),
+            post_strat_all = svymean(margins_formula, post_strat_all),
+            rake_retrospective = svymean(margins_formula, rake_retrospective)) * 100, 5)
+        
+        rownames(margins) <- gsub("recode_", "", rownames(margins))
+        #if seek age margin: we multiplied the recode_age margins by 100 unnecc above bc it' just a straight mean
+        #so let's undo that
+        if(grepl("recode_age(?!_)", as.character(margins_formula_cces)[2], perl = T)) { margins["age",] <- margins["age",]/100 }
+         
+        margins_diff <- as.data.frame(margins) %>% 
+            mutate(pew = cces_margins - pew,
+                   kpop = cces_margins - kpop,
+                   kpop_conv = cces_margins - kpop_conv,
+                   kpop_demos = cces_margins - kpop_demos,
+                   kpop_demos_wedu =cces_margins - kpop_demos_wedu,
+                   kpop_all = cces_margins - kpop_all,
+                   rake_demos_noeduc = cces_margins- rake_demos_noeduc,
+                   rake_demos_weduc = cces_margins- rake_demos_weduc,
+                   rake_all_vars = cces_margins - rake_all_vars,
+                   post_strat_reduc = cces_margins-  post_strat_reduc,
+                   post_strat_all = cces_margins-  post_strat_all,
+                   rake_retrospective = cces_margins- rake_retrospective)
+        rownames(margins_diff) <- rownames(margins)
+        
+
+        if(margins_pop_weighted_avg) {
+            #weighting the difference by the proportion in that bin in cces
+            #margins_diff is in percents, so it's the percent difference btwn the sample and the pop on each margin, we want to take the average abs value of this difference, but we dont' just want the straight average, we want it weighted by the percent in that margin in the cces
+            #so that means if we just multiply the difference by the cces margin/100 we only need to sum them in wmabserr
+            w_margins_diff <- margins_diff*(margins[, "cces_margins"]/100)
+            #don't square cces:
+            w_margins_diff[, "cces_margins"] <- margins_diff[, "cces_margins"]
+            #manually fix the one level margins: then we'll just report the abs diff on these
+            if(grepl("recode_age(?!_)", as.character(margins_formula_cces)[2], perl = T)) { w_margins_diff["age",] <- margins_diff["age",] }
+            
+            wmabserr <- w_margins_diff 
+            #clean names
+            wmabserr$var <- gsub("[A-Z].+$|[0-9][0-9]\\+?$|(?<=way).*[0-9]k?$|(?<=bucket).*[0-9]$|(?<=educ)[0-9].*$","",
+                                 rownames(margins_diff), perl = T)
+            wmabserr$var[wmabserr$var == "educ"]<- "educ_6way"
+          
+            wmabserr <- wmabserr %>% group_by(var) %>% 
+                summarize(pew_unweighted = sum(abs(pew)), 
+                                            kpop = sum(abs(kpop)),
+                                            kpop_conv = sum(abs(kpop_conv)), 
+                                            kpop_demos = sum(abs(kpop_demos)),
+                                            rake_demos_noeduc = sum(abs(rake_demos_noeduc)),
+                                            kpop_demos_wedu = sum(abs(kpop_demos_wedu)),
+                                            rake_demos_weduc = sum(abs(rake_demos_weduc)),
+                                            kpop_all = sum(abs(kpop_all)),
+                                            rake_all_vars = sum(abs(rake_all_vars)), 
+                                            rake_retrospective = sum(abs(rake_retrospective)),
+                                            post_strat_reduc = sum(abs(post_strat_reduc)),
+                                            post_strat_all = sum(abs(post_strat_all))
+                                            )
+            #labels
+            popw_lab = "w/ Pop Weights"
+
+        
+        } else {
+            #get cces proportions: for weighted L1 dist on age 
+            if(grepl("recode_age_factor", as.character(margins_formula_cces)[2], perl = T)) {
+                margins_diff[(grep("age_factor", rownames(margins_diff))), ] <-
+              (margins_diff[(grep("age_factor", 
+                                  rownames(margins_diff))),
+                            ])* (margins[grep("age_factor", rownames(margins)), "cces_margins"]/100)*length(levels(cces$recode_age_factor))
+            }
+            
+            wmabserr <- margins_diff 
+            wmabserr$var <- gsub("[A-Z].+$|[0-9][0-9]\\+?$|(?<=way).*[0-9]k?$|(?<=bucket).*[0-9]$|(?<=educ)[0-9].*$","",
+                                 rownames(margins_diff), perl = T)
+            wmabserr$var[wmabserr$var == "educ"]<- "educ_6way"
+            
+            wmabserr <- wmabserr %>% 
+                group_by(var) %>% summarize(pew_unweighted = mean(abs(pew)), 
+                                        kpop = mean(abs(kpop)),
+                                        kpop_conv = mean(abs(kpop_conv)), 
+                                        kpop_demos = mean(abs(kpop_demos)),
+                                        rake_demos_noeduc = mean(abs(rake_demos_noeduc)),
+                                        kpop_demos_wedu = mean(abs(kpop_demos_wedu)),
+                                        rake_demos_weduc = mean(abs(rake_demos_weduc)),
+                                        kpop_all = mean(abs(kpop_all)),
+                                        rake_all_vars = mean(abs(rake_all_vars)), 
+                                        rake_retrospective = mean(abs(rake_retrospective)),
+                                        post_strat_reduc = mean(abs(post_strat_reduc)),
+                                        post_strat_all = mean(abs(post_strat_all)),
+                                        )
+            #labels
+            popw_lab = "NO Pop Weights"
+        }
+        
+        tol_label = paste0(" tol=",as.character(tolerance))
+        maxit_label = paste0( " maxit=", as.character(maxit))
+
+        if(margins_pop_weighted_avg) {
+            caption_m = paste0("W. Margins (Difference): Unscaled K ", "b=", round(b, 2),
+                           popw_lab, " Age Buckets Only (no dnk) ",
+                           tol_label, maxit_label)
+            caption_o = paste0("Absolute Error on Weighted Margins of Outcomes: Unscaled K ","b=", 
+                               round(b, 2),
+                               popw_lab, " Age Buckets Only (no dnk) ",
+                               tol_label, maxit_label)
+            
+            caption_err = paste0("Weighted Mean Abs Error: Unscaled K ","b=", 
+                                 round(b, 2), popw_lab,
+                                      " Age Buckets Only (no dnk) ", tol_label, maxit_label)   
+            
+        } else {
+            caption_m = paste0("Margins (Difference): Unscaled K ", "b=", round(b, 2),
+                           popw_lab, " Age Buckets Only (no dnk) ",
+                           tol_label, maxit_label)
+            caption_o = paste0("Absolute Error on Margins of Outcomes: Unscaled K ","b=", 
+                               round(b, 2),
+                               popw_lab, " Age Buckets Only (no dnk) ",
+                               tol_label, maxit_label)
+            
+            caption_err = paste0("Mean Abs Error: Unscaled K ","b=", 
+                                 round(b, 2), popw_lab,
+                                      " Age Buckets Only (no dnk) ", tol_label, maxit_label)   
+        }
+        
+        #drop outcome variables if thay are in margins
+        wmabserr_nooutcomes <- wmabserr %>% 
+            filter(!(grepl("xgb|mod|vote", var))) %>%
+            arrange(nchar(var))
+        if(is.null(margins_var_order)) {
+            margins_var_order = c("female", "pid_3way", "age_bucket","race",  "region", "educ_6way",
+                      "income_5way", "born",
+                      "relig_6way", "attndch_4way",
+                      "pid_race", "educ_pid",
+                      "educ_pid_race", "race_educ_reg", "educ_wh_3way", "midwest_wh_edu",
+                      "midwest_edu_race") 
+        }
+        #reorder rows
+        wmabserr_nooutcomes <- wmabserr_nooutcomes[as.numeric(sapply(margins_var_order, 
+                                                                     function(x) which(wmabserr_nooutcomes$var == x))),]
+        #automate the aesthetics of the tables based on the formulas used
+        noedu_aes <- sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_rake_demos_noeduc)[2]),
+                       "gray", "black") })
+        wedu_aes <-  sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_rake_demos_weduc)[2]) | x == "educ_6way", "gray", "black")
+            })
+        all_aes <-  sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_rake_all_vars)[2]) | x == "educ_6way", "gray", "black")
+            })
+        
+        ps_reduc_aes <- sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_ps_reduc)[2]), "gray", "black") })
+        ps_all_aes <- sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_ps_all)[2]), "gray", "black") })
+        #interaction picks up race alone so back and fix bc does not include
+        retro_aes <- sapply(wmabserr_nooutcomes$var, function(x) {
+                ifelse(grepl(x, as.character(formula_retrospective)[2]) & x != "race", "gray", "black") })
+        
+        kpop_demos_aes <- noedu_aes
+        kpop_demos_wedu_aes <- wedu_aes
+        kpop_all_aes <- all_aes
+        
+        #clean up names for latex tables
+        #change name so its clear that recode_educ is 6 way and fixing some labels that are slightly off bc i apparently could not count when i named them
+        wmabserr$var[wmabserr$var == "income_5way"]<- "income (6way)"
+        wmabserr$var[wmabserr$var == "educ_6way"]<- "educ (6way)"
+        wmabserr$var[wmabserr$var == "relig_6way"]<- "relig (5way)"
+        wmabserr$var[wmabserr$var == "educ_wh_3way"]<- "educ (3way)$\times$white"
+        wmabserr$var[wmabserr$var == "race"]<- "race/ethnicity"
+        wmabserr$var[wmabserr$var == "pid_3way"]<- "pid (3way)"
+        wmabserr$var[wmabserr$var == "age_bucket"]<- "age (4way)"
+        
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "income_5way"]<- "income (6way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "educ_6way"]<- "educ (6way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "relig_6way"]<- "religion (5way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "attndch_4way"]<- "church attnd. (4way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "race"]<- "race/ethnicity (4way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "pid_3way"]<- "pid (3way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "region"]<- "region (4way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "born"]<- "born-again (bin)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "age_bucket"]<- "age (4way)"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "educ_wh_3way"]<- "educ (3way)$\\times$white"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "midwest_wh_edu"]<- "midwest$\\times$white$\\times$educ"
+        wmabserr_nooutcomes$var[wmabserr_nooutcomes$var == "age_factor"]<- "age (factor)"
+        
+        kable_prep = wmabserr_nooutcomes
+        kable_prep = structure(data.frame(kable_prep[,-1]), 
+                               class = "data.frame") 
+        old_colnames = colnames(kable_prep)
+        rownames(kable_prep) = wmabserr_nooutcomes$var
+        rownames(kable_prep) =  str_replace_all(rownames(kable_prep),"_", "$\\\\times$")
+        all_cols = c("Pew\n Orig",
+                     "kpop",
+                     "kpop + conv",
+                     "kpop + mf:\n(demos)",
+                     "mean calib:\n(demos)",
+                     "kpop + mf:\n(d+edu)",
+                     "mean calib:\n(d+edu)",
+                     "kpop + mf:\n(all)",
+                     "mean calib:\n(all)",
+                     "mean calib:\n(retro)",
+                     "post-strat\n(reduc)", 
+                     "post-strat\n(all)")
+        #drop methods not asked for... kind of ugle but wokrs
+        select_cols = c("pew_unweighted", gsub("_mf", "", gsub("\\s", "_",specify_kpop), specify_kpop), gsub("\\s", "_",specify_nonkpop))
+        #goes through the specified cols and finds correct col number in kable
+        find_match = sapply(select_cols, function(x) which(grepl(paste0("^",x,"$"), colnames(kable_prep)))) 
+        subset = as.numeric(find_match)
+        subset = sort(subset[(!is.na(subset))])
+        subset
+        kable_prep = kable_prep[ , subset ]
+        colnames(kable_prep)
+        #subset also the object, keeping the first col of var names
+        wmabserr_nooutcomes = wmabserr_nooutcomes[, c(1, subset+1)]
+        colnames(kable_prep) =  linebreak(all_cols[subset ])
+        
+        #make kable for margins
+        #this got ugly when adjusted for user specified methods; kable seems to need column spec +1 when you do it after
+        #creating the kable() obj versus in the same line with a pipe...
+        kable_err <- kable(kable_prep,
+                                   format = "latex",
+                                   caption = caption_err,
+                                   booktabs = T,
+                                    escape = F,
+                                   digits = 2) %>% kable_styling() 
+        
+        if("kpop_demos" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] == "kpop_demos")+1,
+                                    color =kpop_demos_aes) 
+            } 
+        if("rake_demos_noeduc" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "rake_demos_noeduc")+1,
+                                    color = noedu_aes)
+            }
+        if("kpop_demos_wedu" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "kpop_demos_wedu")+1,
+                                    color = kpop_demos_wedu_aes)
+            }
+        if("rake_demos_weduc" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "rake_demos_weduc")+1,
+                                    color = wedu_aes)
+            }
+        if("rake_all_vars" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] == "rake_all_vars")+1,
+                                    color = all_aes)
+            }
+        if("kpop_all" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] == "kpop_all")+1,
+                                    color =kpop_all_aes)
+            } 
+        if("rake_retrospective" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "rake_retrospective")+1,
+                                    color =retro_aes)
+            } 
+        if("post_strat_reduc" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "post_strat_reduc")+1,
+                                        color =ps_reduc_aes)
+            }
+        if("post_strat_all" %in% old_colnames[subset]) {
+                            kable_err = column_spec(kable_err, which(old_colnames[subset] ==
+                                                  "post_strat_all")+1,
+                                        color =ps_all_aes)
+         }
+        
+        #outcomes
+         kable_om <- kable(wmabserr %>% 
+                               filter( grepl("mod|vote", var)) %>%
+                               arrange(nchar(var)),
+                               format = "latex",
+                               caption = caption_o,
+                               booktabs = T,
+                               digits = 2)
+            
+        #pass out full margins
+        margins_out = margins_diff
+        #margins_out <- margins_diff[!grepl("age_factor|mod|vote", rownames(margins_diff)), ] 
+    } else {
+        kable_om = NULL
+        kable_err = NULL
+        margins_out = NULL
+    }
+    
+    ##################################### Plot Prep
+    #this will be structured to take a single choice of
+    df_build <- function(var_orig, var_cces, var_pew, vote_form = vote_diff,
+                         real = FALSE) {
+        if(!real) {
+          df <- data.frame(
+            cces_orig = svycontrast(svymean(as.formula(paste0("~", var_orig)), 
+                                            cces_svy, na.rm = TRUE),
+                                    vote_form),
+            #this is cces modeled outcome on cces
+            cces_mod = svymean(as.formula(paste0("~", var_cces)), cces_svy, na.rm = TRUE),
+            
+            #outcome = modeled cces predicted with pew (cces on pew)
+            unweighted = svymean(as.formula(paste0("~", var_pew)), pew_nowt,
+                                 na.rm = TRUE),
+            pew_weighted = svymean(as.formula(paste0("~", var_pew)), pew_awt, 
+                                   na.rm = TRUE),
+            rake_demos_noeduc = svymean(as.formula(paste0("~", var_pew)), 
+                                        rake_demos_noeduc, na.rm = TRUE),
+            rake_demos_weduc = svymean(as.formula(paste0("~", var_pew)), 
+                                       rake_demos_weduc, na.rm = TRUE),
+            rake_all_vars = svymean(as.formula(paste0("~", var_pew)), 
+                                       rake_all_vars, na.rm = TRUE),
+            post_strat_reduc = svymean(as.formula(paste0("~", var_pew)), 
+                                          post_strat_reduc,
+                                          na.rm = TRUE),
+            post_strat_all = svymean(as.formula(paste0("~", var_pew)), 
+                                          post_strat_all,
+                                          na.rm = TRUE),
+            rake_retrospective = svymean(as.formula(paste0("~", var_pew)),
+                                         rake_retrospective, 
+                                         na.rm = TRUE),
+            kpop = svymean(as.formula(paste0("~", var_pew)), kpop, 
+                                 na.rm = TRUE),
+            kpop_conv = svymean(as.formula(paste0("~", var_pew)), kpop_conv,
+                                      na.rm = TRUE),
+            kpop_demos_mf =svymean(as.formula(paste0("~", var_pew)), kpop_demos,
+                                  na.rm = TRUE),
+            kpop_demos_wedu_mf =svymean(as.formula(paste0("~", var_pew)), 
+                                       kpop_demos_wedu, na.rm = TRUE),
+            kpop_all_mf = svymean(as.formula(paste0("~", var_pew)), 
+                                      kpop_all, na.rm = TRUE)
+            ) %>%
+    pivot_longer(cols = everything(),
+                         names_to = c("source", ".value"), 
+                         names_pattern = "(.*)\\.(.*)") 
+          
+            df$SE <- coalesce(df[[var_cces]], df[[var_pew]], df$SE)
+            df <- df %>% mutate(est = coalesce(nlcon, mean))
+        } else {
+            df <- data.frame(
+                cces_orig = svycontrast(svymean(~recode_vote_2016, 
+                                                cces_svy, na.rm = TRUE),
+                                        vote_form),
+                #outcome = modeled cces predicted with pew (cces on pew)
+                unweighted = svycontrast(svymean(~recode_vote_2016, 
+                                                 pew_nowt, na.rm = TRUE),
+                                         vote_form),
+                pew_weighted = svycontrast(svymean(~recode_vote_2016, 
+                                                   pew_awt, na.rm = TRUE),
+                                           vote_form),
+                
+                rake_demos_noeduc = svycontrast(svymean(~recode_vote_2016, 
+                                                        rake_demos_noeduc, na.rm = TRUE),
+                                                vote_form),
+                rake_demos_weduc = svycontrast(svymean(~recode_vote_2016, 
+                                                       rake_demos_weduc, na.rm = TRUE),
+                                               vote_form),
+                rake_all_vars = svycontrast(svymean(~recode_vote_2016, 
+                                                       rake_all_vars, na.rm = TRUE),
+                                               vote_form),
+                post_strat_reduc = svycontrast(svymean(~recode_vote_2016, 
+                                                          post_strat_reduc,
+                                                          na.rm = TRUE),
+                                                  vote_form),
+                post_strat_all = svycontrast(svymean(~recode_vote_2016, 
+                                                          post_strat_all,
+                                                          na.rm = TRUE),
+                                                  vote_form),
+                rake_retrospective = svycontrast(svymean(~recode_vote_2016, 
+                                                         rake_retrospective,
+                                                         na.rm = TRUE),
+                                                 vote_form),
+            
+                kpop= svycontrast(svymean(~recode_vote_2016,
+                                                  kpop, na.rm = TRUE), vote_form),
+                kpop_conv =svycontrast(svymean(~recode_vote_2016,
+                                                  kpop_conv, na.rm = TRUE), vote_form),
+                
+                kpop_demos_mf = svycontrast(svymean(~recode_vote_2016,
+                                                  kpop_demos, na.rm = TRUE), vote_form),
+                kpop_demos_wedu_mf = svycontrast(svymean(~recode_vote_2016,
+                                                  kpop_demos_wedu, na.rm = TRUE), vote_form),
+                kpop_all_mf = svycontrast(svymean(~recode_vote_2016,
+                                                  kpop_all, na.rm = TRUE), vote_form)
+        ) %>%
+                pivot_longer(cols = everything(),
+                             names_to = c("source", ".value"), 
+                             names_pattern = "(.*)\\.(.*)") 
+            
+            df <- df %>% rename(est = nlcon)
+            
+        }
+        df <- df %>% 
+            dplyr::select(source, est, SE) %>%
+            mutate(est = est * 100,
+                   SE = SE * 100,
+                   source = str_replace(source, "_", " ")) %>% rename(SE_svy = SE)
+
+        
+        df$b <- NA
+        df$b[grep("kpop", df$source) ]<- b
+        df$MF <- "NA"
+        df$MF[grep("mf", df$source)] <- "MF"
+        df$MF[!grepl("mf", df$source) & grepl("kpop", df$source)]<- "No MF"
+        
+        df$Conv <- "NA"
+        df$Conv[!grepl("conv", df$source) & 
+                              grepl("kpop", df$source)]<- "Conv Not Required"
+        df$Conv[c(grep("conv", df$source),
+                            grep("mf", df$source))] <- "Conv Required"
+        df <- df %>% arrange(!is.na(b), b)
+        df <- df %>% 
+            mutate(source_name = factor(source, 
+                                        levels = as.character(df$source) ,
+                                        labels = c("CCES Orig",
+                                                   if(!real){"CCES Modeled"},
+                                                   "Pew unweighted", 
+                                                   "Pew Weights",
+                                                   "mean calibration:\n (demos)", 
+                                                   "mean calibration:\n (demos+edu)", 
+                                                   "mean calibration:\n (all)",
+                                                   "post-stratification:\n (reduc)",
+                                                   "post-strat:\n (all)",
+                                                   "mean calibration:\n (retrospective)", 
+                                                   "kpop",
+                                                   "kpop conv",
+                                                   "kpop+mf:\n (demos)",
+                                                   "kpop+mf:\n (demos+edu)",
+                                                   "kpop+mf:\n (all)"
+                                            )))
+        df <- df %>% filter(!is.na(est))
+        
+        return(df)
+    }
+    
+    comp_df_diff <- df_build(var_orig = "recode_vote_2016", 
+                             var_cces = "diff_cces_on_cces",
+                             var_pew = "diff_cces_on_pew")
+    
+    ####### adding new SEs to vote diff outcome 
+    #NB: only have updated SEs for this outcome run in app_march_23.R
+    #getting SEs for any other outcome requires running regressions on this outcome with the svd dims which is large and time consuming and since in the end we present only the vote diff outcome,
+    #I updated to only add the new SEs to the vote diff outcome alone
+    #can get the SEs for other outcomes by changing "outcome" variable in app_march_23.R and rerunning
+    #or saving the svd object and rerunning SEs running after the fact
+    formula_null = ~1
+    residuals = residuals(lm(update(formula_null, diff_cces_on_pew ~ .), 
+                         data = rake_demos_noeduc$variables))
+    
+    rake_null_se <- calc_SEs(Y = pew$diff_cces_on_pew, 
+                                 residuals = residuals, 
+                                 pop_size = nrow(cces), 
+                                 sample_size =nrow(pew),
+                                 weights = rep(1, nrow(pew)))
+    rownames(rake_null_se) = "pew unweighted"   
+    rake_demos_noeduc_se <- calc_SEs(Y = rake_demos_noeduc$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_demos_noeduc,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_demos_noeduc$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_demos_noeduc))
+    
+    rake_demos_weduc_se <- calc_SEs(Y = rake_demos_weduc$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_demos_weduc,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_demos_weduc$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_demos_weduc))
+    
+    rake_demos_all_se <- calc_SEs(Y = rake_all_vars$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_all_vars,
+                                                              diff_cces_on_pew ~ .), 
+                                                      data = rake_all_vars$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_all_vars))
+    
+    rake_retrospective_se <- calc_SEs(Y = rake_retrospective$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_retrospective,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_retrospective$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_retrospective))
+    
+    SEs = rbind(rake_null_se,
+                rake_demos_noedu = rake_demos_noeduc_se, 
+                rake_demos_wedu = rake_demos_weduc_se,
+                rake_all = rake_demos_all_se, 
+                rake_retrospective = rake_retrospective_se, out$SEs)
+    #these are not in percent, to match the svy package/convenience of plotting *100
+    SEs = 100*SEs
+    #make source column with matching names to comp_df to merge
+   #make source column with matching names to comp_df to merge
+    SEs = cbind(source = c("unweighted", "rake demos_noeduc", "rake demos_weduc", "rake all_vars",
+                           "rake retrospective", 
+                           "kpop", "kpop conv", "kpop amf", "kpop demos_mf", "kpop demos_wedu_mf",
+                           "kpop all_mf"), SEs)
+     #present only what's requested
+    SE = SEs %>% filter(source %in% c(specify_kpop, specify_nonkpop))
+    
+    source_row_order = matrix(comp_df_diff$source)
+    comp_df_diff = merge(comp_df_diff, SEs, by = "source", all.x = T, all.y = T)
+   
+    comp_df_diff = comp_df_diff[ apply(source_row_order, 1, function(x) which(comp_df_diff$source == x)),
+                                 c("source", "source_name", "est", "SE_svy","SE_linear", "SE_fixed", "SE_quasi", "SE_chad", 
+                                   "b", "MF", "Conv")]
+
+    comp_df_margin <- df_build("recode_vote_2016", 
+                               "margin_cces_on_cces",
+                               "margin_cces_on_pew")  
+    comp_df_pR <- df_build("recode_vote_2016", 
+                           "mod_cces_on_cces_pR",
+                           "mod_cces_on_pew_pR",
+                            vote_form = quote((recode_vote_2016Republican  +recode_vote_2016Republican)/2 ))  
+    comp_df_pD <- df_build("recode_vote_2016", 
+                           "mod_cces_on_cces_pD",
+                           "mod_cces_on_pew_pD",
+                           vote_form = quote((recode_vote_2016Democrat +recode_vote_2016Democrat)/2 )) 
+    comp_df_real <- df_build("recode_vote_2016", 
+                           "recode_vote_2016",
+                           "recode_vote_2016",
+                           real = TRUE, 
+                           vote_form = vote_contrast)
+    comp_df_real_diff <-  df_build("recode_vote_2016", 
+                           "recode_vote_2016",
+                           "recode_vote_2016",
+                           real = TRUE) 
+
+    if(is.null(specify_nonkpop)) {
+        specify_nonkpop = comp_df_diff$source
+    }
+    if(is.null(specify_kpop)) {
+        specify_kpop = comp_df_diff$source[grepl("kpop",comp_df_diff$source)]
+    } 
+    comp_df_diff_all = comp_df_diff
+    comp_df_diff <- comp_df_diff_all %>% 
+       filter(source %in% specify_nonkpop | source %in% specify_kpop)
+    comp_df_margin <- comp_df_margin %>% 
+        filter(source %in% specify_nonkpop | source %in% specify_kpop)
+    comp_df_pR <- comp_df_pR %>% 
+        filter(source %in% specify_nonkpop | source %in% specify_kpop)
+    comp_df_pD <- comp_df_pD %>% 
+        filter(source %in% specify_nonkpop | source %in% specify_kpop)
+    comp_df_real <- comp_df_real %>% 
+        filter(source %in% specify_nonkpop | source %in% specify_kpop)
+    comp_df_real_diff <- comp_df_real_diff %>%
+        filter(source %in% specify_nonkpop | source %in% specify_kpop)
+ 
+    popw_lab = "(w/Pop Weights)"
+    mod_lab = "Lasso Modeled"
+  
+    pres <- readRDS(paste0(path_data, "election.rds"))
+    
+    natl_margin <- pres %>%
+        summarise(margin = (sum(demtotal) - sum(reptotal)) /
+                      (sum(demtotal) + sum(reptotal))) %>% as.numeric()
+    natl_diff <- pres %>%
+        summarise(margin = (sum(demtotal) - sum(reptotal)) /
+                      (sum(totalvotes))) %>% as.numeric()
+    natl_Rep <- pres %>%
+        summarise(pR =  sum(reptotal) /
+                      sum(totalvotes)) %>% as.numeric()
+    natl_Dem <- pres %>%
+        summarise(pR =  sum(demtotal) /
+                      sum(totalvotes)) %>% as.numeric()
+    
+    ############Plots... let the horror begin!
+    comp_df_real_margin_plot <- comp_df_real %>% filter(!str_detect(source, "cces"))
+    comp_df_plot_real_margin <-
+        ggplot() +
+        aes(x = source_name, y = est, ymin = est - qnorm(.975)*SE_svy, ymax = est + qnorm(.975)*SE_svy) +
+        
+        geom_hline(yintercept = c(0, natl_margin*100,
+                                  comp_df_margin$est[comp_df_margin$source_name == "CCES Orig"]),
+                   linetype = c("solid", "dashed", "longdash"),
+                   color = c("black", "gray60", "black")) +
+        geom_pointrange(data = comp_df_real_margin_plot) +
+        scale_y_continuous(breaks = c(natl_margin, seq(-5, 10, 5)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        
+        labs(x = NULL, y = "Estimated Vote Margin (95% CI)", popw_lab) +
+        ggtitle(paste("Pew on TRUE CCES Vote Margin", popw_lab, plot_b_lab)) +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1 )) +
+        annotate(geom = "text", x = nrow(comp_df_real_margin_plot)+.35,
+                 y = natl_margin * 100,
+                 label = " True\n National\n Margin",
+                 hjust = 0, angle = -90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text", x = nrow(comp_df_real_margin_plot)+.35,
+                 y = comp_df_margin$est[comp_df_margin$source_name == "CCES Orig"],
+                 label = " Weighted\n CCES\n Target",
+                 hjust = 0, angle = 90, size = 3) +
+        #for spacing
+         annotate(geom = "text", x = nrow(comp_df_real_margin_plot)+1,
+                 y = comp_df_margin$est[comp_df_margin$source_name == "CCES Orig"],
+                 label = " ",
+                 hjust = 0, angle = 90, size = 3) +
+        theme(legend.title = element_blank())
+    
+    comp_df_real_diff_plot <- comp_df_real_diff %>% filter(!str_detect(source, "cces"))
+    comp_df_plot_real_diff <-
+        ggplot() +
+        aes(x = source_name, y = est, ymin = est - qnorm(.975)*SE_svy, ymax = est + qnorm(.975)*SE_svy)  + 
+        
+        geom_hline(yintercept = c(0, natl_diff*100,
+                                  comp_df_real_diff$est[comp_df_real_diff$source_name
+                                                        =="CCES Orig"]),
+                   linetype = c("solid", "dashed", "longdash"),
+                   color = c("black", "gray60", "black")) +
+        geom_pointrange(data = comp_df_real_diff_plot) +
+        scale_y_continuous(breaks = c(natl_diff*100, seq(-5, 10, 5)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        
+        labs(x = NULL, y = "Estimated Vote Difference (95% CI)") +
+        ggtitle(paste("Pew on TRUE CCES Vote Difference",  
+                      popw_lab, plot_b_lab)) +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_real_diff_plot) +.35,
+                 y = natl_diff * 100,
+                 label = " True\n National\n Diff",
+                 hjust = 0, angle = -90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text", x = nrow(comp_df_real_diff_plot) +.35,
+                 y = comp_df_real_diff$est[comp_df_real_diff$source_name == 
+                                               "CCES\ Orig"],
+                 label = " Weighted\n CCES\n Target",
+                 hjust = 0, angle = 90, size = 3) +
+        #for spacing
+         annotate(geom = "text", x = nrow(comp_df_real_diff_plot) +1,
+                 y = comp_df_real_diff$est[comp_df_real_diff$source_name == 
+                                               "CCES Orig"],
+                 label = "",
+                 hjust = 0, angle = 90, size = 3) +
+        theme(legend.title = element_blank())
+    
+    
+    ######### main vote diff plot #########
+    comp_df_diff_plot <- comp_df_diff %>% filter(!str_detect(source, "cces")) %>% 
+    mutate(method =  factor(case_when(str_detect(source, "unweighted") ~ "Raw Survey", 
+                               str_detect(source, "rake") ~ "mean calibration",
+                               str_detect(source, "post") ~ "post-strat",
+                               str_detect(source, "kpop") ~ "kpop", 
+                               TRUE ~ NA_character_),
+                            levels = c("Raw Survey", "mean calibration", "post-strat", "kpop")),
+           zero = 0,
+           natl_diff =natl_diff*100,
+           cces_target = comp_df_diff$est[comp_df_diff$source_name == target],
+           plot_SE = case_when(str_detect(source, "unweighted") ~ SE_svy, 
+                               str_detect(source, "rake") ~ SE_linear,
+                               str_detect(source, "post") ~ SE_svy,
+                               str_detect(source, "kpop") ~ SE_linear, 
+                               TRUE ~ -99))
+
+    label_pos = c(length(specify_kpop) +.5, length(specify_kpop) + .5, length(specify_kpop) + 1)
+    text_for_gg <- data.frame(source_name =  label_pos,
+                          method =factor("kpop", levels(comp_df_diff_plot$method)),
+                          est = c(comp_df_diff_plot$natl_diff[1], 
+                                  comp_df_diff_plot$cces_target[1], 0),
+                          label = c(" True\n National\n Diff", 
+                                    " Weighted\n CCES\n Target", " "))
+
+    #UPDATED TO SE LINEAR = linearization SEs for the main plot; old was SE_svy
+    cat("NB: Main Result plot \"plot_diff\" combines linearization SEs for raking, kpop, and PS with HT SEs for the unweighted pew \n")
+    comp_df_plot_diff <- ggplot(comp_df_diff_plot) +
+        geom_pointrange(aes(x = source_name, 
+                            y = est, 
+                            ymin = est - qnorm(.975)*plot_SE, 
+                            ymax = est + qnorm(.975)*plot_SE)) +
+        facet_grid(cols = vars(method),  scales = "free_x", space = "free_x") +
+        geom_hline(aes(yintercept = zero)) +
+        geom_hline(aes(yintercept = natl_diff), linetype = 2, color = "grey60") +
+        geom_hline(aes(yintercept = cces_target), linetype = 2) +
+       
+        scale_y_continuous(breaks = c(natl_diff*100, seq(-5, 10, 5)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        labs(x = NULL, y = "Estimated Retrospective Vote Difference (95% CI)") +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+        geom_text(data = text_for_gg, aes(x = source_name, 
+                                          y = est,
+                                          label = label), 
+                  angle = c(-90,90, 90), color = c("grey60", "black", "purple"),
+                  hjust = 0, size = 2.6) +
+        theme()
+    
+    ######### CIS
+    
+    comp_df_diff_all <- comp_df_diff_all %>% mutate(
+         plot_SE = case_when(str_detect(source, "weighted|cces|weighted") ~ SE_svy, 
+                               str_detect(source, "rake") ~ SE_linear,
+                               str_detect(source, "post") ~ SE_svy,
+                               str_detect(source, "kpop") ~ SE_linear, 
+                               TRUE ~ -99))
+    
+    CIs_diff <- comp_df_diff_all %>% mutate(CI_low = est - qnorm(.975)*plot_SE, 
+                                             CI_high = est+ qnorm(.975)*plot_SE, 
+                                             CI_width = CI_high - CI_low) %>% 
+    dplyr::select(source, est, CI_low, CI_high, CI_width, plot_SE, SE_svy, SE_linear)
+    
+    CIs_diff =  CIs_diff %>% dplyr::select(source, est, plot_SE, CI_low, CI_high, CI_width, SE_linear, SE_svy)
+    #movign raking retrospective in with all the other raking
+  
+    #first get rake retrospective with other raking    
+    order = comp_df_diff_all$source[c(1:7,11,8:10, 12:nrow(comp_df_diff_all))]
+    order
+    #now subset to only methods specified in input
+    specify_nonkpop_nocces = specify_nonkpop[!grepl("cces",specify_nonkpop)]
+    targ_order = comp_df_diff_all[comp_df_diff_all$source_name == target, "source"]
+    order = order[(order %in% specify_nonkpop_nocces | order %in% specify_kpop | order == targ_order)]
+    kable_pass = CIs_diff[as.numeric(sapply(order, function(x) which(CIs_diff$source == x))),2:5]
+
+    all_rname = comp_df_diff_all[as.numeric(sapply(order, function(x) which(CIs_diff$source == x))),"source_name"]
+    all_rname
+    all_rname = gsub("\\n|\\(|\\)", "", all_rname)
+    all_rname = gsub("demos\\+edu", "(d\\+edu)", all_rname)
+    all_rname = gsub("demos$", "(demos)", all_rname)
+    all_rname = gsub("reduc$", "(reduced)", all_rname)
+    all_rname = gsub("all", "(all)", all_rname)
+    #do not actually want the soace
+    #all_rname = gsub("\\+mf", " \\+ mf", all_rname)
+    all_rname = paste0("\\hspace{1em}", all_rname)
+    all_rname[1] = "\\textbf{CCES Target}"
+    rownames(kable_pass) = all_rname
+    rownames(kable_pass) = gsub(":", "", rownames(kable_pass))
+    colnames(kable_pass) = c("Estimate", "SE", "CI Lower", "CI Upper")
+    
+    kable_diff_CI <- kable(kable_pass,
+                           escape = F,
+                        format = "latex", 
+                        booktabs = T,
+                        caption = "Performance on Modeled p(D) - p(R) Vote Difference among Various Weighting Methods",
+                        digits = 2)
+    
+    
+    kable_SE_pass = comp_df_diff %>% dplyr::select(source_name, est, SE_svy, SE_fixed, SE_linear, SE_quasi, SE_chad)
+    kable_diff_allSEs <- kable(kable_SE_pass, 
+                        format = "latex", 
+                        booktabs = T,
+                        caption = "Comparison of SE Estimators across Methods (in Percent)",
+                        digits = 2)
+    
+    
+    ########### TEMP: View ALL SEs in One Big Plot
+    gg_unravel = rbind(comp_df_diff_plot, 
+                   comp_df_diff_plot, 
+                   comp_df_diff_plot, 
+                   comp_df_diff_plot, 
+                   comp_df_diff_plot) %>% dplyr::select(source, est, method,
+                                                 source_name, 
+                                                 zero, natl_diff, cces_target)  %>% 
+    mutate(SE = c(comp_df_diff_plot$SE_svy, 
+                      comp_df_diff_plot$SE_fixed,
+                      comp_df_diff_plot$SE_quasi, 
+                      comp_df_diff_plot$SE_linear, 
+                      comp_df_diff_plot$SE_chad), 
+           SE_method = as.factor(rep(c("Svy Pkg", "Fixed", "Quasi-Poisson", "Linear", "Chad"),
+                           each = nrow(comp_df_diff_plot)) ))
+
+    gg_unravel[grepl("pew|strat|unweighted", gg_unravel$source) & is.na(gg_unravel$SE), "est"] = NA
+    
+    text_pass = " Weighted\n CCES\n Target"
+    
+    text_for_gg <- data.frame(source_name =  c(.8, .8, 2),
+                              method =factor("Raw Survey", levels(comp_df_diff_plot$method)),
+                              est = c(comp_df_diff_plot$natl_diff[1], 
+                                      comp_df_diff_plot$cces_target[1], 0),
+                              label = c(" True\n National\n Diff", 
+                                        text_pass, " "))
+
+
+    comp_df_plot_diff_allSEs <-ggplot(gg_unravel) +
+    geom_pointrange(aes(x = source_name, 
+                        y = est, 
+                        ymin = est - qnorm(.975)*SE, 
+                        ymax = est + qnorm(.975)*SE, color = SE_method), 
+                    position = position_dodge(width = .8)) +
+    facet_grid(cols = vars(method),  scales = "free_x", space = "free_x") +
+    geom_hline(aes(yintercept = zero)) +
+    geom_hline(aes(yintercept = natl_diff), linetype = 2, color = "grey60") +
+    geom_hline(aes(yintercept = cces_target), linetype = 2) +
+    
+    scale_y_continuous(breaks = c(natl_diff*100, seq(-5, 10, 5)),
+                       minor_breaks = NULL,
+                       labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    labs(x = NULL, y = "Estimated Retrospective Vote Difference (95% CI)") +
+    theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+    labs(color= "SE Method") + 
+    geom_text(data = text_for_gg, aes(x = source_name, 
+                                      y = est,
+                                      label = label), 
+              angle = c(-90,90, 90), color = c("grey60", "black", "purple"),
+              hjust = 0, size = 2.6) +
+    theme()
+
+    comp_df_margin_plot <- comp_df_margin %>% filter(!str_detect(source, "cces")) 
+    comp_df_plot_margin <-
+        ggplot() +
+        aes(x = source_name,
+            y = est, 
+            ymin = est - qnorm(.975)*SE_svy, ymax = est + qnorm(.975)*SE_svy) +
+        geom_hline(yintercept = c(0, 
+                                  natl_margin*100,
+                                  comp_df_margin$est[comp_df_margin$source_name == "CCES Modeled"]),
+                   linetype = c("solid", 
+                                "dashed",
+                                "dashed"),
+                   color = c("black", 
+                             "gray60",
+                             "black")) +
+        geom_pointrange(data =  comp_df_margin_plot) +
+        scale_y_continuous(breaks = c(natl_margin, seq(-5, 10, 5)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        
+        labs(x = NULL, y = "Estimated Modeled Vote Margin (95% CI)") +
+        ggtitle(paste("Pew on CCES", mod_lab, "Mean Indiv Vote Margin",popw_lab,
+                      plot_b_lab)) +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+         annotate(geom = "text", 
+                  x = nrow(comp_df_margin_plot)+.35, 
+                 y = natl_margin * 100,
+                 label = " True\n National\n Margin",
+                 hjust = 0, angle = -90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text", 
+                 x =  nrow(comp_df_margin_plot)+.35,
+                 y = comp_df_margin$est[comp_df_margin$source_name == "CCES Modeled"],
+                 label = " CCES\n Modeled Target",
+                 color = "black",
+                 hjust = 0, angle = 90, size = 3) +
+        #for spacing
+        annotate(geom = "text",
+                 x = nrow(comp_df_margin_plot)+1,
+                 y = comp_df_margin$est[comp_df_margin$source_name == "CCES Modeled"],
+                 label = "",
+                 color = "purple",
+                 hjust = 0, angle = -90, size = 3) +
+        
+        theme(legend.title = element_blank())
+    
+    
+    ####### p(R) plot
+    comp_df_pR_plot <- comp_df_pR %>% filter(!str_detect(source, "cces")) 
+    comp_df_plot_both_pR <-
+        ggplot() +
+        aes(x = source_name, y = est, ymin = est - qnorm(.975)*SE_svy, ymax = est + qnorm(.975)*SE_svy) +
+        
+        geom_hline(yintercept = c(natl_Rep*100,
+                                  comp_df_pR$est[comp_df_pR$source_name == "CCES Modeled"]),
+                   linetype = c( "dashed", 
+                                 "dashed"),
+                   color = c("gray60",
+                             "black")) +
+        geom_pointrange(data = comp_df_pR_plot) +
+        scale_y_continuous(breaks = c(natl_Rep, seq(40, 48, 2)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        
+        labs(x = NULL, y = "Estimated Modeled Vote p(R) (95% CI)") +
+        ggtitle(paste("Pew on CCES", mod_lab,  "p(R) modeled",
+                     popw_lab, plot_b_lab)) +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_pR_plot)+.35, 
+                 y = natl_Rep * 100,
+                 label = " True\n National\n % Rep",
+                 hjust = 0, angle = +90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text",
+                 x = nrow(comp_df_pR_plot)+.35,
+                 y = comp_df_pR$est[comp_df_pR$source_name == "CCES Modeled"],
+                 label = " CCES\n Modeled Target",
+                 color = "black",
+                 hjust = 0, angle = -90, size = 3) +
+        #for spacing
+        annotate(geom = "text", 
+                 x = nrow(comp_df_pR_plot)+1,
+                 y = comp_df_pR$est[comp_df_pR$source_name == "CCES Modeled"],
+                 label = "",
+                 color = "purple",
+                 hjust = 0, angle = -90, size = 3) +
+        theme(legend.title = element_blank())
+    
+    
+    ###### p(D) plot
+    comp_df_pD_plot <- comp_df_pD %>% filter(!str_detect(source, "cces")) 
+    
+    comp_df_plot_both_pD <-
+        ggplot() +
+        aes(x = source_name, y = est, ymin = est - qnorm(.975)*SE_svy, ymax = est + qnorm(.975)*SE_svy) +
+        
+        geom_hline(yintercept = c(natl_Dem*100,
+                                  comp_df_pD$est[comp_df_pD$source_name == "CCES Modeled"]),
+                   linetype = c( "dashed",
+                                 "dashed"),
+                   color = c("gray60",
+                             "black")) +
+        geom_pointrange(data = comp_df_pD_plot ) +
+        scale_y_continuous(breaks = c(natl_Dem*100, seq(40, 56, 4)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        
+        labs(x = NULL, y = "Estimated Modeled Vote p(R) (95% CI)") +
+        ggtitle(paste("Pew on CCES", mod_lab, "p(D) modeled",
+                      popw_lab, plot_b_lab)) +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1)) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_pD_plot)+.35,
+                 y = natl_Dem * 100,
+                 label = " True\n National\n % Rep",
+                 hjust = 0, angle = -90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_pD_plot)+.35,
+                 y = comp_df_pD$est[comp_df_pD$source_name == "CCES Modeled"],
+                 label = " CCES\n Modeled Target",
+                 color = "black",
+                 hjust = 0, angle = 90, size = 3) +
+        annotate(geom = "text",
+                 x = nrow(comp_df_pD_plot)+1,
+                 y = comp_df_pD$est[comp_df_pD$source_name == "CCES Modeled"],
+                 label = "",
+                 color = "purple",
+                 hjust = 0, angle = 90, size = 3) +
+        theme(legend.title = element_blank() )
+
+    
+    out <- list(plot_diff = comp_df_plot_diff,
+                plot_diff_allSEs = comp_df_plot_diff_allSEs,
+                plot_margin = comp_df_plot_margin,
+                plot_pR = comp_df_plot_both_pR,
+                plot_pD = comp_df_plot_both_pD,
+                plot_real_margin = comp_df_plot_real_margin,
+                plot_real_diff = comp_df_plot_real_diff,
+                margins = margins,
+                w_margins_diff = w_margins_diff,
+                margins_diff = margins_diff,
+                wmabserr = wmabserr,
+                wmabserr_nooutcomes = wmabserr_nooutcomes,
+                kable_err = kable_err,
+                kable_outmom = kable_om,
+                problem_reduc = problem_reduc,
+                problem_all = problem_all,
+                comp_df_diff = comp_df_diff,
+                comp_df_diff_all = comp_df_diff_all,
+                comp_df_margin = comp_df_margin,
+                comp_df_pR = comp_df_pR,
+                comp_df_pD = comp_df_pD, 
+                comp_df_real_margin = comp_df_real,
+                comp_df_real_diff = comp_df_real_diff, 
+                kable_diff = kable_diff_CI,
+                kable_diff_allSEs = kable_diff_allSEs,
+                CIs_diff_plot = CIs_diff, 
+                gg_unravel = gg_unravel)
+    return(out)
+}
+
+```
+
+Produces main results in section 6:
+Weighted estimates in Figure 1 and Appendix Table C.3 
+Margins on auxiliary variables in Table 4
+Standard Error Estimates by SE Estimator in Appendix Table D3.3
+
+Additional results not included in the paper:
+All margins on all available variables
+Plot comparing different SE estimators
+Plot examining modeled vote margin rather than difference
+Plots examining modeled probability of voting Democrat and Republican separately
+Plots examining weighted actual self-reported Pew likely vote choice (margin and difference)
+
+Interested replicators may also adjust the function call to request a different set of weighting estimators (additional available include kpop with forced ebalance convergence and post stratification on all variables), different margins, margins not weighted by the CCES population margins (which themselves are weighted by CCES's internal weights), or change the population target from the modeled vote difference in the weighted CCES to the actual self-reported vote difference in the weighted CCES.
+
+```{r run_res_main, echo = F, include = F}
+#run to get plot without ps all
+#default run of function reports all methods in paper, but can adjust for fewer or more (post-stratification on all variables and kpop with forced convergence)
+results = main_res_plot(weights_file = weights_file, 
+                     target = "modeled vote choice")
+#look at results:
+
+##### Main Weighted Outcome Results ####
+#Main Plot Results: Figure 1 in Section 6 - weighted estimates by various methods
+results$plot_diff
+# ggsave("/Users/Ciara_1/Dropbox/kpop/2023/application/plots/app_votediff_linSEs_svdMF_Final.pdf",
+#       width = 8.5, height = 4.5)
+
+#cleaned latex numerical version of this plot: Table C.3 in Appendix C
+results$kable_diff
+#dataframe that produces Figure 1 in Section 6
+results$CIs_diff_plot
+
+
+######## Margins #########
+###### Table 4: Weighted Mean Absolute Error across a number of Auxiliary Variables ####
+results$kable_err
+#this is built using the object
+results$wmabserr_nooutcomes
+#full raw margins are in the following object
+head(results$margins_diff)
+
+##### Standard Errors #####
+#kable results that produce Table D3.3 in Appendix D
+results$kable_diff_allSEs
+#this table is produced from the object: "comp_df_diff"
+results$comp_df_diff
+
+
+
+###### Additional Results
+#plot comparing all SEs 
+results$plot_diff_allSEs
+#results comparing the modeled vote margin rather than difference: p(D) - p(R)/ sum(p(D) + p(R))
+#this plot does not have updated linearization SEs for kpop, instead using very conservative HT
+results$plot_margin
+#results of only p(R) modeled outcome
+#this plot does not have updated linearization SEs for kpop, instead using very conservative HT
+results$plot_pR
+#results of only p(D) modeled outcome
+#this plot does not have updated linearization SEs for kpop, instead using very conservative HT
+results$plot_pD
+#plot of the pew respondents actual reported vote choice rather than their CCES 3way lasso multinomial model projection
+#as can be seen, all methods are severely biased, likely due to misreported vote preference or late swings
+results$plot_real_margin
+results$plot_real_diff
+
+```
+
+
+\clearpage
+
+Figure 1 - Weighted Estimates
+
+```{r fig_1, echo = F, fig.align = 'center', fig.width = 14, fig.height = 9}
+results$plot_diff_allSEs
+```
+
+Appendix Table D3.3 - Numerical Results of Figure 1 
+
+```{r table_d33, echo = F}
+results$kable_diff_allSEs
+```
+
+Table 4 - Auxiliary Variable Margins
+
+```{r table_4, echo = F}
+results$kable_err
+```
+
+
+# Plots over Range of b
+
+Results across a range of values of b are produces using a separate weights file not produced by app_kpop_run.R but an expansion which runs the same code in parallel and saves to a weights file. The resulting weights file object has a slightly different format that that produced by app_kpop_run.R as a result. Interested replicators may request this parallelized version from the authors, but given that the code is not substantively different from that in app_kpop_run.R, we have instead simply supplied the weight file to load directly and produce the following results.
+
+```{r rangeBplot, echo = F}
+
+rangeb_plot <- function(clean_nonkpop = TRUE, 
+                    specify_nonkpop = NULL,
+                    display_conv = FALSE) {
+    #this subsets cces strata to only those in pew
+    missing_strata_reduc <- unique(cces$strata_reduc)[!(unique(cces$strata_reduc) %in%
+                                                unique(pew$strata_reduc))]
+    
+     cat(length(missing_strata_reduc)/ length( unique(cces$strata_reduc)), 
+         "% cces reduc strata missing from pew, ",
+        "\nand", cces %>% filter(strata_reduc %in% missing_strata_reduc) %>% summarise(n()) %>% pull(), "/", nrow(cces), "units\n" )
+     
+    missing_strata_all <- unique(cces$strata_all)[!(unique(cces$strata_all) %in%
+                                                unique(pew$strata_all))]
+     cat(length(missing_strata_all)/ length( unique(cces$strata_all)),
+         "% cces all strata missing from pew, ",
+         "\nand", cces %>% filter(strata_all %in% missing_strata_all) %>% summarise(n()) %>% pull(), "/", nrow(cces), "units\n")
+    
+    #we also have the reverse where pew may have strata we don't have in cces
+    #this arises if we eliminate NAs in recode_vote for cces
+    #this ofc would never happen if cces was a true full pop but it's actually just
+    #a much bigger sample so it can happen
+     problem_reduc <- unique(pew$strata_reduc)[!(unique(pew$strata_reduc) %in%
+                                                   unique(cces$strata_reduc))]
+     problem_all <- unique(pew$strata_all)[!(unique(pew$strata_all) %in%
+                                                   unique(cces$strata_all))]
+     if(length(problem_reduc) != 0) {
+     warning(paste("NB: strata reduc present in pew not in cces will be dropped in ps:\n",
+                   "\nrepresenting", nrow(pew %>% filter(strata_reduc %in%
+                                                             problem_reduc)),
+                   "/", nrow(pew), "\n"), immediate. = F)
+     }
+     if(length(problem_all) != 0) {
+     warning(paste("NB: strata all present in pew not in cces will be dropped in ps:\n",
+                   "\nrepresenting", nrow(pew %>% filter(strata_all %in% problem_all)),
+                   "/", nrow(pew), "\n"), immediate. = F)
+     }
+   
+    pew_srs <- suppressWarnings(svydesign(ids = ~1, data = pew))
+    pew_w_srs <-  svydesign(ids = ~1, weights = ~weight, data = pew)
+
+    load(paste0(path_weights, allB_weights_file))
+    cat("loading: allB_2023_POPW_2023-07-01.Rdata\n w/tol=", tolerance, "maxit=",maxit, 
+       "popw=", POPW)
+    weights = lapply(cat_app, `[[`, 3)
+    clean = lapply(cat_app, `[[`, 1) %>% bind_rows()
+    SEs =  lapply(cat_app, `[[`, 2) %>% bind_rows()
+    SEs = cbind(SEs, b =  rep(b, each = 3))
+
+    #main run
+    load(paste0(path_weights,weights_file))
+    cat(paste0("loading weights w: maxit=", maxit," tolerance=", tolerance," b=", 
+               round(out$est$b_out,3)," popweights=", POPW,"\n from file ",
+               weights_file,"\n"))
+    b_maxvar = out$est$b_out
+    clean = rbind(clean,out$est[,colnames(clean)])
+    kpop_bmaxvar_w <- out$weights$kpop_w
+    kpop_bmaxvar_conv_w <- out$weights$kpop_w_conv
+    kpop_bmaxvar_mf_w <- out$weights$kpop_mf_w
+    pass = cbind(out$SEs[1:3,], b = rep(b_maxvar, 3))
+    #dropping larger b's
+    SEs = SEs %>% filter(b < 256)
+    SEs = rbind(SEs, pass)
+    
+    # kpop_bmaxvar_demos_w <- out$weights$kpop_demos_w
+    # kpop_bmaxvar_demos_wedu_w <- out$weights$kpop_demos_wedu_w
+    # kpop_bmaxvar_all_w <- out$weights$kpop_all_w
+    
+    ############## PREP FOR PLOT
+    ###### Kbal
+    kbal_data_sampled <- c(rep(1, nrow(pew)), rep(0, nrow(cces)))
+    
+    kpop_bmaxvar <- svydesign(~1, data = pew, 
+                                  weights =
+                                 kpop_bmaxvar_w[kbal_data_sampled==1])
+    kpop_bmaxvar_conv <- svydesign(~1, data = pew, 
+                               weights = 
+                                  kpop_bmaxvar_conv_w[kbal_data_sampled==1])
+    kpop_mf_bmaxvar <- svydesign(~1, data = pew, 
+                             weights =kpop_bmaxvar_mf_w[kbal_data_sampled==1])
+         
+    #other b's (dropping everything above 128)   
+    kpop_b128 <- svydesign(~1, data = pew, 
+                                      weights = weights[[7]]$kpop_w[kbal_data_sampled==1])
+    kpop_b64 <- svydesign(~1, data = pew, 
+                      weights = weights[[6]]$kpop_w[kbal_data_sampled==1])
+    kpop_b32 <- svydesign(~1, data = pew, 
+                          weights = weights[[5]]$kpop_w[kbal_data_sampled==1])
+    kpop_b16 <- svydesign(~1, data = pew, 
+                          weights = weights[[4]]$kpop_w[kbal_data_sampled==1])
+    kpop_b8 <- svydesign(~1, data = pew, 
+                         weights = weights[[3]]$kpop_w[kbal_data_sampled==1])
+    kpop_b4 <- svydesign(~1, data = pew, 
+                         weights = weights[[2]]$kpop_w[kbal_data_sampled==1])
+    kpop_b2 <- svydesign(~1, data = pew, 
+                         weights = weights[[1]]$kpop_w[kbal_data_sampled==1])
+    
+    kpop_b128_conv <- svydesign(~1, data = pew, 
+                           weights = 
+                               weights[[7]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b64_conv <- svydesign(~1, data = pew, 
+                           weights = 
+                               weights[[6]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b32_conv <- svydesign(~1, data = pew, 
+                               weights = 
+                                   weights[[5]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b16_conv <- svydesign(~1, data = pew, 
+                               weights =
+                                  weights[[4]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b8_conv <- svydesign(~1, data = pew, 
+                              weights =
+                                  weights[[3]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b4_conv <- svydesign(~1, data = pew, 
+                              weights =
+                                  weights[[2]]$kpop_w_conv[kbal_data_sampled==1])
+    kpop_b2_conv <- svydesign(~1, data = pew, 
+                              weights =
+                                  weights[[1]]$kpop_w_conv[kbal_data_sampled==1])
+    
+    
+    kpop_mf_b128 <- svydesign(~1, data = pew, 
+                         weights =
+                             weights[[7]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b64 <- svydesign(~1, data = pew, 
+                         weights =
+                             weights[[6]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b32 <- svydesign(~1, data = pew, 
+                             weights =
+                                 weights[[5]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b16 <- svydesign(~1, data = pew, 
+                             weights =
+                                 weights[[4]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b8 <- svydesign(~1, data = pew, 
+                            weights =
+                                weights[[3]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b4 <- svydesign(~1, data = pew, 
+                            weights =
+                                weights[[2]]$kpop_mf_w[kbal_data_sampled==1])
+    kpop_mf_b2 <- svydesign(~1, data = pew, 
+                            weights =
+                                weights[[1]]$kpop_mf_w[kbal_data_sampled==1])
+    
+       
+    cces_svy = svydesign(ids = ~1, weights = ~commonweight_vv_post, data = cces)
+    
+    targets_rake_demos_noeduc <- create_targets(cces_svy, 
+                                                    formula_rake_demos_noeduc)
+    targets_rake_demos_weduc <- create_targets(cces_svy, 
+                                               formula_rake_demos_weduc)
+    targets_rake_all_vars <- create_targets(cces_svy, 
+                                               formula_rake_all_vars)
+    targets_retrospective <- create_targets(cces_svy,
+                                            formula_retrospective)
+    
+    targets_ps_reduc <- svytable(formula = ~strata_reduc,
+                       design = subset(cces_svy, !(strata_reduc %in%
+                                                        missing_strata_reduc)))
+    targets_ps_all <- svytable(formula = ~strata_all,
+                       design = subset(cces_svy, !(strata_all %in%
+                                                        missing_strata_all)))
+     
+    rake_demos_noeduc <- calibrate(design = pew_srs,
+                                   formula = formula_rake_demos_noeduc,
+                                   population = targets_rake_demos_noeduc,
+                                   calfun = "raking")
+    
+    rake_demos_noeduc <- svydesign(~1, data = pew,
+                                   weights = weights(rake_demos_noeduc))
+    
+    ## Raking on demographics, including education
+    rake_demos_weduc <- calibrate(design = pew_srs,
+                                  formula = formula_rake_demos_weduc,
+                                  population = targets_rake_demos_weduc,
+                                  calfun = "raking")
+    
+    rake_demos_weduc <- svydesign(~1, data = pew, weights =
+                                      weights(rake_demos_weduc))
+    #rake all
+    rake_all_vars <- calibrate(design = pew_srs,
+                                  formula = formula_rake_all_vars,
+                                  population = targets_rake_all_vars,
+                                  calfun = "raking")
+    
+    rake_all_vars <- svydesign(~1, data = pew, weights =
+                                      weights(rake_all_vars))
+    
+    ## Post-stratification
+     #reduced
+    pew_ps_reduc_xgb <- suppressWarnings(svydesign(ids = ~1, data = pew %>% 
+                                      filter(!(strata_reduc %in% problem_reduc))))
+    post_strat_reduc <- postStratify(design = pew_ps_reduc_xgb,
+                                        strata = ~strata_reduc,
+                                        population = targets_ps_reduc)
+    post_strat_reduc <- svydesign(~1, 
+                                  data = pew %>%filter(!(strata_reduc %in%
+                                                                 problem_reduc)),
+                                     weights = weights(post_strat_reduc))
+    
+    pew_ps_all_xgb <- suppressWarnings(svydesign(ids = ~1, 
+                                data = pew %>% filter(!(strata_all %in% problem_all))))
+    post_strat_all <- postStratify(design = pew_ps_all_xgb,
+                                        strata = ~strata_all,
+                                        population = targets_ps_all)
+    post_strat_all <- svydesign(~1,
+                                data = pew %>% filter(!(strata_all %in% problem_all)),
+                                weights = weights(post_strat_all))
+    
+    
+    rake_retrospective <- calibrate(design = pew_srs,
+                                    formula = formula_retrospective,
+                                    population = targets_retrospective,
+                                    calfun = "raking",
+                                    force = TRUE)
+    rake_retrospective <- svydesign(~1, data = pew,
+                                    weights = weights(rake_retrospective))
+        
+    
+    ########### Get Estimates #########
+    df_build <- function(var_orig, var_cces, var_pew, vote_form = vote_diff) {
+       
+      df <- data.frame(
+        cces_orig = svycontrast(svymean(as.formula(paste0("~", var_orig)), 
+                                        cces_svy, na.rm = TRUE),
+                                vote_form),
+        #this is cces modeled outcome on cces
+        cces_mod = svymean(as.formula(paste0("~", var_cces)), cces_svy, na.rm = TRUE),
+        
+        #outcome = modeled cces predicted with pew (cces on pew)
+        unweighted = svymean(as.formula(paste0("~", var_pew)), pew_srs,
+                             na.rm = TRUE),
+        pew_weighted = svymean(as.formula(paste0("~", var_pew)), pew_w_srs, 
+                               na.rm = TRUE),
+        rake_demos_noeduc = svymean(as.formula(paste0("~", var_pew)), 
+                                    rake_demos_noeduc, na.rm = TRUE),
+        rake_demos_weduc = svymean(as.formula(paste0("~", var_pew)), 
+                                   rake_demos_weduc, na.rm = TRUE),
+        rake_all_vars = svymean(as.formula(paste0("~", var_pew)), 
+                                   rake_all_vars, na.rm = TRUE),
+        post_strat_reduc = svymean(as.formula(paste0("~", var_pew)), 
+                                      post_strat_reduc,
+                                      na.rm = TRUE),
+        post_strat_all = svymean(as.formula(paste0("~", var_pew)), 
+                                      post_strat_all,
+                                      na.rm = TRUE),
+        rake_retrospective = svymean(as.formula(paste0("~", var_pew)),
+                                     rake_retrospective, 
+                                     na.rm = TRUE),
+        kpop_bmaxvar =svymean(as.formula(paste0("~", var_pew)), kpop_bmaxvar,
+                              na.rm = TRUE),
+        kpop_bmaxvar_conv =svymean(as.formula(paste0("~", var_pew)), 
+                                   kpop_bmaxvar_conv, na.rm = TRUE),
+        kpop_mf_bmaxvar = svymean(as.formula(paste0("~", var_pew)), 
+                                  kpop_mf_bmaxvar, na.rm = TRUE),
+        
+        kpop_b128 = svymean(as.formula(paste0("~", var_pew)), kpop_b128, 
+                    na.rm = TRUE),
+        kpop_b64 = svymean(as.formula(paste0("~", var_pew)), kpop_b64, 
+                    na.rm = TRUE),
+        kpop_b32 = svymean(as.formula(paste0("~", var_pew)), kpop_b32, 
+                    na.rm = TRUE),
+        kpop_b16 = svymean(as.formula(paste0("~", var_pew)), kpop_b16, 
+                    na.rm = TRUE),
+        kpop_b8 =  svymean(as.formula(paste0("~", var_pew)), kpop_b8, 
+                     na.rm = TRUE),
+        kpop_b4 = svymean(as.formula(paste0("~", var_pew)), kpop_b4, 
+                    na.rm = TRUE),
+        kpop_b2 = svymean(as.formula(paste0("~", var_pew)), kpop_b2,
+                    na.rm = TRUE),
+
+        kpop_b128_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b128_conv, 
+                    na.rm = TRUE),
+        kpop_b64_conv = svymean(as.formula(paste0("~", var_pew)), 
+                    kpop_b64_conv, na.rm = TRUE),
+        kpop_b32_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b32_conv,
+                                na.rm = TRUE),
+        kpop_b16_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b16_conv, 
+                                na.rm = TRUE),
+        kpop_b8_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b8_conv,
+                               na.rm = TRUE),
+        kpop_b4_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b4_conv, 
+                               na.rm = TRUE),
+        kpop_b2_conv = svymean(as.formula(paste0("~", var_pew)), kpop_b2_conv, 
+                               na.rm = TRUE),
+        
+        kpop_mf_b128 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b128,
+                    na.rm = TRUE),
+        kpop_mf_b64 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b64,
+                    na.rm = TRUE),
+        kpop_mf_b32 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b32,
+                              na.rm = TRUE),
+        kpop_mf_b16 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b16, 
+                              na.rm = TRUE),
+        kpop_mf_b8 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b8, 
+                             na.rm = TRUE),
+        kpop_mf_b4 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b4, 
+                             na.rm = TRUE),
+        kpop_mf_b2 = svymean(as.formula(paste0("~", var_pew)), kpop_mf_b2,
+                             na.rm = TRUE) ) %>%
+          pivot_longer(cols = everything(),
+                     names_to = c("source", ".value"), 
+                     names_pattern = "(.*)\\.(.*)") 
+      
+        df$SE <- coalesce(df[[var_cces]], df[[var_pew]], df$SE)
+        df <- df %>% mutate(est = coalesce(nlcon, mean))
+        df <- df %>% filter(!is.na(source))
+        #some manual fixing of names 
+        df <- df %>% 
+            dplyr::select(source, est, SE) %>%
+            mutate(est = est * 100,
+                   SE = SE * 100,
+                   #err_target = est - target_diff * 100,
+                   source = str_replace(source, "_", " "))
+        
+        b_num <- c(rep(b_maxvar, 3), rep(c(128,64,32,16,8,4,2), 3))
+        
+        df$b <- NA
+        df$b[grep("b", df$source) ]<- b_num
+        df$MF <- "NA"
+        df$MF[grep("mf", df$source)] <- "MF"
+        df$MF[!grepl("mf", df$source) & grepl("kpop", df$source)]<- "No MF"
+        df$Conv <- "NA"
+        df$Conv[!grepl("conv", df$source) & 
+                              grepl("kpop", df$source)]<- "Conv Not Required"
+        df$Conv[c(grep("conv", df$source),
+                            grep("mf", df$source))] <- "Conv Required"
+        df <- df %>% arrange(!is.na(b), b)
+        df <- df %>% 
+            mutate(source_name = factor(source, 
+                                        levels = as.character(df$source) ,
+                                        labels = c("CCES Orig",
+                                                   "CCES Modeled",
+                                                   "Pew unweighted", 
+                                                   "Pew Weights",
+                                                   "mean calibration (demos)", 
+                                                   "mean calibration (demos w/edu)", 
+                                                   "mean calibration (all)",
+                                                   "post-strat (reduced)",
+                                                   "post-strat (all)",
+                                                   "mean calibration (retrospective)", 
+                                                   
+                                                   "kpop b=2",
+                                                   "kpop conv b=2",
+                                                   "kpop mf b=2",
+                                                   
+                                                   "kpop b=4",
+                                                   "kpop conv b=4",
+                                                   "kpop mf b=4",
+                                                   
+                                                   "kpop b=argmax V(K)\n(5.6)",
+                                                   "kpop conv b=argmax V(K)\n(5.6)",
+                                                   "kpop mf b=argmax V(K)\n(5.6)",
+                                                   
+                                                    "kpop b=8",
+                                                    "kpop conv b=8",
+                                                    "kpop mf b=8",
+                                                
+                                                    "kpop b=16",
+                                                    "kpop conv b=16",
+                                                    "kpop mf b=16",
+                                            
+                                                    "kpop b=32",
+                                                    "kpop conv b=32",
+                                                    "kpop mf b=32",
+                                            
+                                                    "kpop b=64",
+                                                    "kpop conv b=64",
+                                                    "kpop mf b=64",
+                                            
+                                                    "kpop b=128",
+                                                    "kpop conv b=128",
+                                                    "kpop mf b=128" )))
+        df <- df %>% filter(!is.na(est))
+        
+        return(df)
+    }
+    
+    comp_df_diff <- df_build("recode_vote_2016", "diff_cces_on_cces", "diff_cces_on_pew")
+    
+    ################################# New SEs: only possible for lasso outcome
+    formula_null = ~1
+    residuals = residuals(lm(update(formula_null, diff_cces_on_pew ~ .), 
+                         data = rake_demos_noeduc$variables))
+    
+    rake_null_se <- calc_SEs(Y = pew$diff_cces_on_pew, 
+                                 residuals = residuals, 
+                                 pop_size = nrow(cces), 
+                                 sample_size =nrow(pew),
+                                 weights = rep(1, nrow(pew)))
+    rownames(rake_null_se) = "pew unweighted"   
+    rake_demos_noeduc_se <- calc_SEs(Y = rake_demos_noeduc$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_demos_noeduc,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_demos_noeduc$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_demos_noeduc))
+    
+    rake_demos_weduc_se <- calc_SEs(Y = rake_demos_weduc$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_demos_weduc,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_demos_weduc$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_demos_weduc))
+    
+    rake_demos_all_se <- calc_SEs(Y = rake_all_vars$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_rake_all_vars,
+                                                              diff_cces_on_pew ~ .), 
+                                                      data = rake_all_vars$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_all_vars))
+    
+    rake_retrospective_se <- calc_SEs(Y = rake_retrospective$variables$diff_cces_on_pew, 
+                             residuals = residuals(lm(update(formula_retrospective,
+                                                             diff_cces_on_pew ~ .), 
+                                                      data = rake_retrospective$variables)), 
+                             pop_size = nrow(cces), 
+                             sample_size = nrow(pew),
+                             weights = weights(rake_retrospective))
+    #dont have SEs for pew's weighted bc we don't strictly know what they weighted on so can't residualize
+    rake_p_weighted_se = rake_null_se
+    rownames(rake_p_weighted_se) = "pew weighted"
+    
+    SEs_full = rbind(rake_null_se,
+                     rake_p_weighted_se, 
+                     rake_demos_noedu = rake_demos_noeduc_se, 
+                     rake_demos_wedu = rake_demos_weduc_se,
+                     rake_all = rake_demos_all_se, 
+                     rake_retrospective = rake_retrospective_se, 
+                     SEs[, -ncol(SEs)])
+    #these are not in percent, to match the svy package/convinience of plotting *100
+    SEs_full = 100*SEs_full
+    #make source column with matching names to comp_df to merge
+    source_names = map(SEs$b, 
+                       function(x) source = comp_df_diff$source[which(comp_df_diff$b == x)])  %>% unlist()
+
+    seq = seq(1,length(source_names), by = 9)
+    seq = c(seq, seq+1, seq+2) %>% sort
+    #source_names[seq]
+    SEs_full = cbind(SEs_full, 
+                     source = c("unweighted", 
+                           "pew weighted", "rake demos_noeduc", "rake demos_weduc", "rake all_vars",
+                           "rake retrospective", 
+                           source_names[seq]), stringsAsFactors = F)
+    
+    source_row_order = matrix(comp_df_diff$source)
+    comp_df_diff_old = comp_df_diff
+    comp_df_diff = merge(comp_df_diff, SEs_full, by = "source", all.x = T, all.y = T)
+    
+    ###### plots
+    if(clean_nonkpop) {
+        if(is.null(specify_nonkpop)) {
+            select_nonkpop <- c("CCES Orig", "CCES Modeled",
+                                     "Pew unweighted", 
+                                     "mean calibration (demos)", 
+                                     "mean calibration (demos w/edu)", 
+                                     "mean calibration (all)",
+                                     "mean calibration (retrospective)",
+                                     "post-strat (reduced)")
+        }
+       comp_df_diff <- comp_df_diff %>% 
+           filter(source_name %in% select_nonkpop | grepl("kpop", source_name))
+
+    }
+    
+    
+    ######## PLOT ESTIMATES: Pre-wave Indiv Average Margin ########
+    pres <- readRDS(paste0(path_data, "election.rds"))
+    
+    natl_diff <- pres %>%
+        summarise(margin = (sum(demtotal) - sum(reptotal)) /
+                      (sum(totalvotes))) %>%
+        as.numeric()
+
+    best_b <- c("kpop b=argmax V(K)\n(5.6)",
+                "kpop conv b=argmax V(K)\n(5.6)",
+                "kpop mf b=argmax V(K)\n(5.6)")
+    ###################
+    if(!display_conv) {
+    
+        comp_df_diff <- comp_df_diff %>% filter(!(Conv == "Conv Required" & MF == "No MF")) %>% 
+            mutate(method = case_when(MF == "No MF" ~ "kpop", 
+                                      MF == "MF" ~ "kpop + mf", 
+                                      MF == "NA" & str_detect(source, "rake") ~  "mean calibration", 
+                                      MF == "NA" & str_detect(source, "post") ~  "Post Stratification",
+                                      TRUE ~ "Original Sample"))
+        
+        best_b <- c("kpop b=argmax V(K)\n(5.6)",
+                "kpop mf b=argmax V(K)\n(5.6)")
+    }
+    
+    ######## new SEs plot vote diff
+    
+    comp_df_diff_plot <- comp_df_diff %>% filter(!str_detect(source, "cces")) %>% 
+    mutate(method =  factor(case_when(str_detect(source, "unweighted") ~ "Raw Survey", 
+                               str_detect(source, "rake") ~ "mean calibration",
+                               str_detect(source, "post") ~ "post-strat",
+                               str_detect(source, "kpop") ~ "kpop", 
+                               TRUE ~ NA_character_),
+                            levels = c("Raw Survey", "mean calibration", "post-strat", "kpop")),
+           #cces_target = comp_df_diff$est[comp_df_diff$source_name == "CCES Orig"],
+           plot_SE = case_when(str_detect(source, "unweighted") ~ SE, 
+                               str_detect(source, "rake") ~ SE_linear,
+                               str_detect(source, "post") ~ SE,
+                               str_detect(source, "kpop") ~ SE_linear, 
+                               TRUE ~ SE))
+    label_pos = c(nrow(comp_df_diff) +.5,nrow(comp_df_diff)  + .5, nrow(comp_df_diff) + 1)
+    text_for_gg <- data.frame(source_name =  label_pos,
+                          method =factor("kpop", levels(comp_df_diff_plot$method)),
+                          est = c(comp_df_diff_plot$natl_diff[1], 
+                                  comp_df_diff_plot$cces_target[1], 0),
+                          label = c(" True\n National\n Diff", 
+                                    " Weighted\n CCES\n Target", " "))
+
+    #UPDATED TO SE LINEAR = linearization SEs for the main plot; old was SE_svy
+    cat("NB: plot_diff combines linearization SEs for raking, kpop, and PS with HT SEs for the unweighted pew \n")
+    ######
+    #best b bolded annoying to deal with bc of the factor levels, so do it here:
+    #get the right order first
+    bold_text = levels(comp_df_diff_plot$source_name)
+    #now drop everything that we drop from the plot
+    bold_text = bold_text[bold_text %in% comp_df_diff_plot$source_name]
+    bold_text = ifelse(bold_text %in% best_b ,"bold","plain")
+    
+    comp_df_plot_diff <- suppressWarnings(
+        ggplot() +
+        aes(x = source_name, y = est, ymin = est - 1.96*plot_SE, ymax = est + 1.96*plot_SE,
+            color = if(display_conv) {as.factor(Conv)} else {
+                as.factor(method) }, 
+            shape= if(display_conv) {as.factor(MF)} else {as.factor(method)}) +
+        geom_hline(yintercept = c(natl_diff*100,
+                                  comp_df_diff$est[comp_df_diff$source_name == "CCES Orig"]),
+                   linetype = c("dashed", "longdash"),
+                   color = c("gray60","black")) +
+        
+        geom_pointrange(data = comp_df_diff_plot %>% filter(!str_detect(source, "cces|pew weighted"))) +
+        scale_y_continuous(breaks = c(natl_diff*100, seq(-5, 10, 5)),
+                           minor_breaks = NULL,
+                           labels = scales::percent_format(scale=1, accuracy = 0.1)) +
+        theme_bw() +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        labs(x = NULL, y = "Estimate of Retrospective Vote Difference (95% CI)") +
+        theme(axis.text.x = element_text(angle = 70, hjust = 1,
+                                         #made above
+                                         face= bold_text )) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_diff_plot)+1.55, 
+                 y = natl_diff * 100,
+                 label = " True\n National\n Diff",
+                 hjust = 0, angle = -90,
+                 color = "gray60", size = 3) +
+        annotate(geom = "text", 
+                 x = nrow(comp_df_diff_plot)+1.55, 
+                 y = comp_df_diff$est[comp_df_diff$source_name == "CCES Orig"],
+                 label = " Weighted\n CCES\n Target",
+                 color = "black",
+                 hjust = 0, angle = 90, size = 3) +
+        #for spacing
+        annotate(geom = "text", 
+                 x = nrow(comp_df_diff_plot)+3,
+                 y = comp_df_diff$est[comp_df_diff$source_name == "CCES Modeled"],
+                 label = "",
+                 color = "purple",
+                 hjust = 0, angle = -90, size = 3) +
+        scale_alpha_discrete(range=c(1, .4)) +
+        scale_color_brewer(palette = "Set1") + 
+        theme(legend.title = element_blank(), legend.position = "bottom"))
+
+    comp_df_plot_diff
+    
+    
+    #numdims table
+    numdims = clean %>% select(b_out, numdims, mfnumdims) %>% arrange(b_out) %>% filter(b_out < 256)
+    rownames(numdims) = NULL
+    kable_numdims = kable(numdims, 
+                        format = "latex", 
+                        booktabs = T,
+                        col.names = c("b", "kpop: Optimal Dimensions of svd(K)", 
+                                      "kpop+mf (all):"),
+                        caption = "Optimal Dimensions of svd(K) Balanced on by choice of gaussian exponent denominator b",
+                        digits = 2)
+    
+    ### output
+    out <- list(orig_estimates = clean, 
+                plot_diff = comp_df_plot_diff,
+                comp_df_diff = comp_df_diff,
+                numdims_table = numdims,
+                kable_numdims = kable_numdims,
+                problem_reduc = problem_reduc,
+                problem_all = problem_all)
+    return(out)
+}
+
+
+
+```
+
+Produces Figure C.3 and table C.6 in Appendix C.5 of kpop estimates across a range of choices of $b$.
+
+```{r run_allBplot, echo= F, include =F}
+
+allB <- rangeb_plot()
+
+# ggsave("/Users/Ciara_1/Dropbox/kpop/2023/application/plots/allb_svdMF_Final.pdf",
+#       width = 8, height = 6)
+#Table C.6 in Appendix C
+allB$kable_numdims
+#from object
+allB$numdims_table
+```
+
+```{r allb_figs, echo = F, fig.align = 'center', fig.width = 14, fig.height = 9}
+allB$plot_diff
+#Table C.6 in Appendix C
+allB$kable_numdims
+```
+
+
+
+# K scree plot 
+
+The following loads the svd of several kernel matrices to save time. They can easily be directly reproduced using the code below, it is just time consuming to compute. THis produces the scree plot in appendix B.1
+
+
+```{r K_scree, eval = T, include = F}
+############# K Scree plots
+#Can directly make Kernels with different b values and take SVD
+#OR, load results from author's .Rdata object since this takes some computation time
+load(paste0(path_weights, "Kscree_svds_reduced.Rdata"))
+
+### ALT: compute directly:
+# kbal_data <- bind_rows(pew %>% dplyr::select(recode_age_bucket,
+#                                              recode_female,
+#                                              recode_race,
+#                                              recode_region,
+#                                              recode_pid_3way,
+#                                              recode_educ,
+#                                              recode_income_5way,
+#                                              recode_relig_6way,
+#                                              recode_born,
+#                                              recode_attndch_4way),
+#                        cces %>% dplyr::select(recode_age_bucket,
+#                                               recode_female,
+#                                               recode_race,
+#                                               recode_region,
+#                                               recode_pid_3way,
+#                                               recode_educ,
+#                                               recode_income_5way,
+#                                               recode_relig_6way,
+#                                               recode_born,
+#                                               recode_attndch_4way))
+# kbal_data_sampled <- c(rep(1, nrow(pew)), rep(0, nrow(cces)))
+# 
+# onehot_data = kbal::one_hot(kbal_data)
+# #get "best b" = the value which maximizing the variance in K 
+# b_orig = b_maxvarK(onehot_data, useasbases = kbal_data_sampled, cat_data = T)
+# #save selected b value, note that this is twice what it should be because the onehot encoding leads to doubles counts
+# b_maxvar = b_orig$b_maxvar/2
+# #NB: the factor of sqrt(1/2) is included because the onehot data has doubled counts everywhere which needs to be "undone" either in the denominator b, or in the data itself
+# #in other words:
+# #K orig = onehotdata + 2*kbal_est$b: label should be still be b = 5.66  
+# #K b/2 = onehotdata + kbal_est$b: label should be b = 5.66/2 though
+# #K b*2 = onehotdata + 4*kbal_est$b: label should be b = 5.66*2
+# #K b*4 = onehotdata + 8*kbal_est$b: label should be b = 5.66*4
+# #this can all equivalently be accomplished by using the correct b but including the sqrt(1/2) factor in 
+# #all one hot columns; I will do that to avoid confusion if ever coming back to this:
+# #K orig = sqrt(1/2)*onehotdata + kbal_est$b: label should be b = 5.66  
+# #K b/2 = sqrt(1/2)*onehotdata + kbal_est$b/2: label should be b = 5.66/2 
+# #K b*2 = sqrt(1/2)*onehotdata + 2*kbal_est$b: label should be b = 5.66*2
+# #K b*4 = sqrt(1/2)*onehotdata + 4*kbal_est$b: label should be b = 5.66*4
+
+#Make Kernels with different b choices:
+# #b = 1/2 maxvar(K)
+# K_05_b <- makeK(sqrt(1/2)*onehot_data,
+#                  b=(1/2)*b_maxvar,
+#                  useasbases = c(rep(1, nrow(pew)), rep(0, nrow(cces))),
+#                    linkernel = FALSE, scale = FALSE)
+# ## b = maxvar(K) [original]
+# K_est <- makeK(sqrt(1/2)*onehot_data,
+#                b=b_maxvar,
+#                useasbases = c(rep(1, nrow(pew)), rep(0, nrow(cces))),
+#                linkernel = FALSE, scale = FALSE)
+# # #b = 2*maxvar(K)
+# K_2b <- makeK(sqrt(1/2)*onehot_data,
+#                  b= 2*b_maxvar,
+#                  useasbases = c(rep(1, nrow(pew)), rep(0, nrow(cces))),
+#                    linkernel = FALSE, scale = FALSE)
+# #b = 4*maxvar(K)
+# K_4b <- makeK(sqrt(1/2)*onehot_data,
+#                  b=4*b_maxvar,
+#                  useasbases = c(rep(1, nrow(pew)), rep(0, nrow(cces))),
+#                    linkernel = FALSE, scale = FALSE)
+# #glimpse
+# K_05_b[1:3,1:3]
+# K_est[1:3,1:3]
+# K_2b[1:3, 1:3]
+# K_4b[1:3, 1:3]
+# 
+# #the horribly time consuming part, take the svd
+# dim(K_05_b)
+# K_05_b_svd <- svd(K_05_b)
+# K_b_svd <- svd(K_est)
+# K_2b_svd <- svd(K_2b)
+# K_4b_svd <- svd(K_4b)
+
+#save smaller versions to save memory, only save eigenvectors and not large U and V matricies
+# K_05_b_svd$u = "not saved"
+# K_05_b_svd$v = "not saved"
+# K_2b_svd$u = "not saved"
+# K_2b_svd$v = "not saved"
+# K_4b_svd$u = "not saved"
+# K_4b_svd$v = "not saved"
+# K_b_svd$u =  "not saved"
+# K_b_svd$v  = "not saved"
+
+# save(K_05_b_svd,K_2b_svd,K_4b_svd, K_b_svd, b_maxvar, file = "./Kscree_svds_reduced.Rdata" )
+
+
+#### build plot
+ggdata <- data.frame(b = c( rep(paste(round((1/2)*b_maxvar,2), "= argmax V(K)*1/2"), 2052),
+                            rep(paste(round(b_maxvar,2), "= argmax V(K)"), 2052),
+                            rep(paste(round(2*b_maxvar,2), "= argmax V(K)*2"), 2052),
+                            rep(paste(round(4*b_maxvar,2), "= argmax V(K)*4"), 2052) 
+                            ),
+                     d = c(K_05_b_svd$d/K_05_b_svd$d[1],
+                           K_b_svd$d/K_b_svd$d[1],
+                           K_2b_svd$d/K_2b_svd$d[1],
+                           K_4b_svd$d/ K_4b_svd$d[1]),
+                     index = rep(c(1:2052), 4))
+
+ggdata$b = factor(ggdata$b, levels = unique(ggdata$b))
+
+#Figure
+k_scree_fig <- ggplot(ggdata) +
+  geom_line(aes(y = d, x = index, color = b)) +
+  xlim(0,50) +
+  ylab("Singular Values (Scaled)") +
+  xlab("Singular Vector") +
+  ggtitle("K Scree Plot by Choice of b (denominator of Gaussian exponent)") +
+  scale_color_discrete(name = "Choice of b") +
+  theme_bw()
+k_scree_fig
+#ggsave("/Users/Ciara_1/Dropbox/kpop/2023/application/plots/screeplot_scaled_variousb.pdf", height = 4, width = 6)
+
+```
+
+
+
+Figure B.1 in Appendix B
+
+```{r k_scree_fig, echo =F, fig.align = 'center', fig.width = 14, fig.height = 9, warning=F, message=FALSE}
+ k_scree_fig 
+
+```

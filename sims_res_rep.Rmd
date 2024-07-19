@@ -1,0 +1,615 @@
+---
+title: "kpop Simulation Results"
+output: 
+  pdf_document:
+    keep_tex: true
+header-includes:
+  - \usepackage{graphicx}
+  - \usepackage{booktabs}
+  - \usepackage{makecell}
+  - \usepackage{xcolor}
+---
+
+\section{Simulation Details}
+\label{app:simulations}
+
+
+In Section \ref{subsec:sim_intro} we briefly described our simulation study. While \textit{kpop} achieves good balance and low bias estimates in our application,  we employ a simulation setting to more fully investigate performance on both bias and variability. To construct a realistic simulation, we employ the same setting above, but specify the selection and outcome models to have direct control over the mechanism of bias. 
+
+```{r libs, include =F, message=FALSE, warning= F}
+suppressMessages(library(tidyverse))
+library(parallel)
+suppressMessages(library(knitr))
+library(kableExtra)
+library(survey)
+```
+
+```{r filenames, include = F}
+### Load Simulation Resutls
+path_weights = paste0(getwd(), "/weights/")
+#r^2=.5 non-linear 1k sims file
+r5_nonlin_file = "sims_kpop_2023-10-04_nsims1000.RData"
+#originally named: "res_kpopTRUE_noise1_on2023-10-04_nsims1000.RData" run on the ISI cluster with file sims_23_prev_svdX_series.R
+
+### Load Target Data
+path_data= paste0(getwd(), "/generated_data/")
+#Below uses the original prepared data "cces_prepared_orig.rds" used by the authors.
+#if use manually prepared data from data_prep_rep.R should be named "cces_prepared.rds" 
+cces <- readRDS(paste0(path_data, "cces_prepared_orig.rds"))
+```
+
+
+```{r functions, include = F}
+coverage <- function(SE, x_bar, truth =NULL, crit_val= qnorm(0.975)) {
+    if(is.null(truth)) {
+        truth = svymean(~outcome, cces_svy)[1]
+    }
+    x_upper = x_bar + (SE*crit_val)
+    x_lower = x_bar - (SE*crit_val)
+    contains_truth = matrix(NA, ncol = ncol(SE), nrow = 1)
+    for(i in 1:ncol(x_upper)) {
+        contains_truth[,i] = sum((truth <= x_upper[,i] & truth >= x_lower[,i]))/nrow(SE)
+    }
+    colnames(contains_truth) = colnames(x_bar)
+    return(contains_truth)
+}
+
+# eval coverage of diff SEs
+all_SE_coverage <- function(sims, adjust_bias = FALSE, drop_NA = F, truth = NULL, methods = c("rake|kpop")) {
+   
+    est <- sims[1]$sims
+    SEs <- sims[2]$SEs
+    
+    if(adjust_bias) {
+        temp = est[grepl(methods, colnames(est))]
+        avg_bias = colMeans(temp, na.rm = drop_NA) - truth
+        bias_adj = temp
+        for(i in 1:ncol(temp)) {
+            bias_adj[, i] = temp[,i] - avg_bias[i]
+        }
+        est[grepl(methods, colnames(est))] = bias_adj
+    }
+    
+    
+    est_c = est[grepl(methods, colnames(est))]
+    SEs = SEs[grepl(methods, colnames(SEs))]
+    
+    if(drop_NA) {
+        n_drop = NULL
+        coverage_out = NULL
+        for(i in 1:ncol(est_c)) {
+            est_temp = na.omit(est_c[,i])
+            n_drop = c(n_drop, nrow(est) - length(est_temp))
+            if(i ==1) {
+                names(n_drop) = colnames(est_c)[i]
+            } else {
+                names(n_drop)[i] = colnames(est_c)[i]
+            }
+            SEs_temp = na.omit(SEs[grepl(paste0(colnames(est_c)[i],"_SE"), colnames(SEs))])
+            
+            SE_fixed = SEs_temp[grepl("SE_fixed$", colnames(SEs_temp))]
+            SE_linear = SEs_temp[grepl("SE_linear$", colnames(SEs_temp))]
+            SE_quasi = SEs_temp[grepl("SE_quasi$", colnames(SEs_temp))]
+            SE_chad= SEs_temp[grepl("SE_chad$", colnames(SEs_temp))]
+            
+            coverage_out = cbind(coverage_out, rbind(coverage(SE_fixed, est_temp, truth = truth),
+                                                     coverage(SE_linear, est_temp, truth = truth),
+                                                     coverage(SE_quasi, est_temp,truth = truth),
+                                                     coverage(SE_chad,est_temp,truth = truth)))
+            rownames(coverage_out) = c("SE_fixed", "SE_linear", "SE_quasi", "SE_chad")
+            colnames(coverage_out)[i] = colnames(est_c)[i]
+            
+        }
+    } else {
+        est_c = est[grepl(methods, colnames(est))]
+        SEs = SEs[grepl(methods, colnames(SEs))]
+        SE_fixed = SEs[grepl("SE_fixed$", colnames(SEs))]
+        SE_linear = SEs[grepl("SE_linear$", colnames(SEs))]
+        SE_quasi = SEs[grepl("SE_quasi$", colnames(SEs))]
+        SE_chad= SEs[grepl("SE_chad$", colnames(SEs))]
+        
+        SE_svy= SEs[grepl("SVY", colnames(SEs))]
+        if(ncol(SE_svy) != 0){
+            #just making sure we're getting the estimates for the same SEs that we output from svy obj which currently is demos_noedu
+            search = gsub("_se_SVY","", colnames(SE_svy))
+            grepl(search, colnames(est_c))
+            s = coverage(SE_svy, truth = truth, est_c[,grepl(search, colnames(est_c))])
+            s1 = rep(NA, ncol(SE_fixed))
+            s1[grepl(search, colnames(est_c))] = s
+            #colnames(s1) = colnames(SE_fixed)
+            coverage_out = rbind(coverage(SE_fixed, est_c, truth = truth),
+                                 coverage(SE_linear, est_c, truth = truth),
+                                 coverage(SE_quasi, est_c,truth = truth),
+                                 coverage(SE_chad,est_c,truth = truth), 
+                                 s1)
+            rownames(coverage_out) = c("SE_fixed", "SE_linear", "SE_quasi", "SE_chad", "SE_svy")
+        } else {
+            coverage_out = rbind(coverage(SE_fixed, est_c, truth = truth),
+                                 coverage(SE_linear, est_c, truth = truth),
+                                 coverage(SE_quasi, est_c,truth = truth),
+                                 coverage(SE_chad,est_c,truth = truth))
+            rownames(coverage_out) = c("SE_fixed", "SE_linear", "SE_quasi", "SE_chad")
+        }
+        
+    }
+    
+    if(drop_NA) {
+        out = list()
+        out$n_drop = n_drop
+        out$coverage = coverage_out
+    } else {
+        out = coverage_out
+    }
+    if(adjust_bias) {
+        out$bias_adj_est = est
+    }
+    return(out)
+}
+
+empirical_SEs <- function(sims, eval_kpop = T, na_rm = F) {
+   
+    est <- sims[1]$sims
+    SEs = sims[2]$SEs
+   
+    #avg SEs
+    avg_SE = colMeans(SEs, na.rm = na_rm)
+    avg_SE_out = rbind(avg_SE[grepl("SE_fixed$", names(avg_SE))],
+                       avg_SE[grepl("SE_linear$", names(avg_SE))],
+                       avg_SE[grepl("SE_quasi$", names(avg_SE))],
+                       avg_SE[grepl("SE_chad", names(avg_SE))],
+                       avg_SE[grepl("SVY", names(avg_SE))])
+    rownames(avg_SE_out) = c("SE_fixed", "SE_linear", "SE_quasi", "SE_chad", "SE_SVY") 
+    colnames(avg_SE_out) = gsub("_SE_fixed", "", colnames(avg_SE_out))
+    avg_SE_out
+    
+    #avg_SE_out = cbind(unweighted = NA, avg_SE_out)
+    
+    #bootstrapped SEs
+    est = est[grepl(c("rake|kpop|post|unweighted|h"), colnames(est))]
+    boot_SE = t(as.matrix(apply(est, 2, sd)))
+    SE_boot = boot_SE[, colnames(boot_SE) %in% colnames(avg_SE_out)]
+    emp_SEs = rbind(avg_SE_out, SE_boot)
+    
+    return(list(emp_SEs =emp_SEs, 
+                boot_SE = boot_SE,
+                avg_SE = avg_SE_out) )    
+}
+
+```
+
+
+```{r r5_nonlin, echo = F}
+load(paste0(path_weights, r5_nonlin_file))
+#Selection Model:
+selection_coefs_kable = data.frame(coefs)
+colnames(selection_coefs_kable) = "Coefficient Value"
+rownames(selection_coefs_kable) = gsub("^recode_", "", rownames(selection_coefs_kable))
+selection_coefs_kable = kable(selection_coefs_kable,
+                                  format = "latex", booktabs = T,
+                   caption = paste("Non-Linear Selection Model" ))
+
+#Summary of Selection Probabilitiies
+out = c(min(p_include), 
+        quantile(p_include, c(0.25, 0.5, .75)), 
+        max(p_include), 
+        sum(p_include))
+out = as.matrix(out)
+rownames(out) =  c("Min", "25%", "Mean", "75%", "Max", "Sum")
+colnames(out) = c("Selection Probability")
+
+#
+selection_prob_kable = kable(round(out, 4), format = "latex", 
+                   booktabs = T,
+                   caption = paste("Sample Inclusion Probabilities"))
+
+#R^2
+s = summary(lm(update(selection_model, outcome ~ .), data = cces))
+R2_outcome = s$adj.r.squared
+
+coefs_outcome_kable = data.frame(coefs_outcome)
+colnames(coefs_outcome_kable) = "Coefficient Value"
+rownames(coefs_outcome_kable) = gsub("^recode_", "", rownames(coefs_outcome_kable))
+
+coefs_outcome_kable = kable(coefs_outcome_kable,
+                            digits = 4,
+                                  format = "latex", booktabs = T,
+                   caption = paste("Non-Linear Selection Mode with R2=",
+                  round(R2_outcome,2), "Outcome Model") )
+
+#plots
+gg_dat = data.frame(Selection_Probability = p_include,
+                    Pid = cces$recode_pid_3way,
+                    Outcome_pD = outcome)
+
+max = data.frame(pS = p_include, pid = cces$recode_pid_3way) %>%
+    group_by(pid) %>% summarise(max = round(max(pS)*100,2 ))
+
+gg_p_include_pid = ggplot(gg_dat) +
+    geom_density(aes(x= Selection_Probability, color = Pid)) + 
+    annotate(geom = "label", x=quantile(p_include,.5),
+             y=Inf, vjust = 1,
+             color = "red",
+             label =  paste0("Dem Max P(S)= ", max[max$pid =="Dem", "max"], "%")) + 
+    annotate(geom = "label",x=quantile(p_include,.5), 
+             y=Inf, vjust = 3,
+             label= paste0("Ind Max P(S)= ", max[max$pid =="Ind", "max"], "%" ), 
+              color = "green") +
+    annotate(geom = "label",x=quantile(p_include,.5), 
+             y=Inf, vjust = 5,
+             label= paste0("Rep Max P(S)= ", max[max$pid =="Rep", "max"], "%" ),
+              color = "blue") +
+    ggtitle(paste("Non-Linear Selection Model with R2=",
+                  round(R2_outcome,2), "Distribution of Seleciton Probabilities by Party")) +
+    theme_bw()
+
+gg_p_include_outcome = ggplot(gg_dat) +
+    geom_point(aes(x= Selection_Probability, y= Outcome_pD, color = Pid)) + 
+    ggtitle(paste("Non-linear Models with R2=",
+                  round(R2_outcome,2), "Distribution of p(Y=1) and p(S=1)")) +
+    theme_bw()
+
+```
+
+
+## Probability Sample Selection Model:
+
+First, we specify a simplistic but non-linear selection model as follows:
+
+\begin{align*}
+p(S=1) &= logit^{-1}\Big( PID(3way) + Age(4way)+ Gender + educ(3way) + Race(4way) \\ 
+&+ BornAgain + PID(3way)*Age(4way) + BornAgain*Age(4way)\Big)
+\end{align*}
+
+Coefficients are chosen to be roughly similar to a fitted model to pew that yields a sample size around 500. Namely:
+
+```{r, echo = F}
+selection_coefs_kable %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+This yields the following sampling probabilities:
+```{r, echo = F}
+selection_prob_kable %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+## Outcome Model: 
+
+To keep things straight forward, the outcome model is identical to the selection model. In other words, again we have:
+
+\begin{align*}
+p(Vote=D) &= PID(3way) + Age(4way)+ Gender + educ(3way) + Race(4way) \\
+&+ BornAgain + PID(3way)*Age(4way) + BornAgain*Age(4way)
+\end{align*}
+
+
+We add normally distributed noise to this outcome with mean zero and standard deviation $\sigma = sd(Y)*1$, yielding an $R^2\approx.5$. To yield negative bias, the coefficients in the outcome model start as the inverse of the coefficients in the selection model, then through an automated procedure they are adjusted until they produce $\hat{y}$'s that lie within a probability range. This yields a population target in percentage points of $\bar{Y} =49.14\%$. The correlation between selection probability and the probability of voting democratic is $\approx -0.6$. This induces a bias in the unweighted sample around -3.5\%. 
+
+```{r, echo = F}
+coefs_outcome_kable %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+```{r, echo = F, eval = F}
+cat(paste0("Target= ", round(mean(outcome),4)*100, 
+           "%\nThe correlation between p(S=1) and p(D =1)=", round(cor(p_include, outcome), 3)))
+```
+
+
+\clearpage
+## Simulation Results: 
+
+We compare \textit{kpop} and \textit{kpop+mf} against the same set of mean calibration specifications discussed at length in the application in section 6.1. This including raking demographics, demographics with education and raking on all variables. We also compare performance against post stratification, stratifying on the true sample selection model. Notably, even though our model is fairly simplistic, the complexity of the full cross-sectional strata is such that empty cells post a challenge for post-stratification. On average, post-stratification must drop around 22.7\% of population units due to missing strata in the sample. Finally, we include mean calibration on the true selection model which meats the (link) linear ignorability assumption as well as the canonical Horvitz-Thompson estimator. 
+
+```{r ps_drop_m3, eval = F, echo = F}
+ps_dropped = sims[5] 
+
+cat(paste0("PS must drop an average of ", round(mean(ps_dropped$dropped_cells),2),
+           " (sd=", round(sd(ps_dropped$dropped_cells)), ")",
+           " which is ", round(100*(mean(ps_dropped$dropped_cells)/nrow(cces)),2),"% of the population\n"))
+```
+
+### Bias and MSE
+
+The resulting bias across a full range of methods is displayed in the table below.
+
+```{r r5_res, echo=F}
+#box plot of estimates
+est <- sims[1]$sims
+
+plot = est
+margin_sim = mean(outcome)*100
+plot_lasso_margin_r5 <- plot %>% 
+    dplyr::select(unweighted, 
+                  rake_demos_noeduc,
+                  rake_demos_weduc,
+                  rake_all,
+                  post_stratification,
+                  #post_strat_reduc,
+                  #post_strat_all,
+                  rake_truth,
+                  kpop, 
+                  kpop_conv,
+                  #kpop_mf, 
+                  kpop_demos,
+                  kpop_demos_wedu,
+                  kpop_all, 
+                  ht_truth,
+                  hayek_truth) %>% 
+    pivot_longer(everything(),
+                 names_to = "estimator", 
+                 values_to = "margin") %>%
+    mutate(margin = margin * 100,
+           #not change of amf to mf(ALL)
+           estimator_name = factor(case_when(estimator == "kpop" ~ "kpop",
+                                             #estimator == "kpop_mf" ~ "kpop+amf\n (all)",
+                                             estimator == "kpop_conv" ~ "kpop converged",
+                                             estimator == "kpop_demos" ~ "kpop+mf\n (demos)",
+                                             estimator == "kpop_demos_wedu" ~ "kpop+mf\n (demos+edu)",
+                                             estimator == "kpop_all" ~ "kpop+mf\n (all)",
+                                             estimator == "rake_demos_noeduc" ~ "mean calibration\n (demos)",
+                                             estimator == "rake_demos_weduc" ~  "mean calibration\n (demos+edu)",
+                                             estimator == "rake_all" ~ "mean calibration\n (all)",
+                                             estimator == "rake_truth" ~ "mean calibration\n true selection\nmodel",
+                                             estimator == "post_stratification" ~ "post-stratification\n true selection\nmodel",
+                                             #estimator == "post_strat_reduc" ~ "post-stratification:\n (reduc)",
+                                             estimator == "post_strat_all" ~ "post-strat all",
+                                             estimator == "unweighted" ~ "Unweighted",
+                                             estimator == "ht_truth" ~ "Horvitz-Thompson",
+                                             estimator == "hayek_truth" ~ "Hayek"),
+                                   levels = c("Unweighted", 
+                                              "mean calibration\n (demos)",
+                                              "mean calibration\n (demos+edu)",
+                                              "mean calibration\n (all)",
+                                              "post-stratification\n true selection\nmodel", 
+                                              #"post-stratification:\n (reduc)", 
+                                              #"post-strat all",
+                                              "kpop",
+                                              "kpop converged",
+                                              "kpop+amf\n (all)",
+                                              "kpop+mf\n (demos)",
+                                              "kpop+mf\n (demos+edu)",
+                                              "kpop+mf\n (all)",
+                                              "mean calibration\n true selection\nmodel",
+                                              "Horvitz-Thompson",
+                                              "Hayek"
+                                   ) ) )
+pass_sims = nrow(est)
+gg_out_r5 = ggplot(data = plot_lasso_margin_r5,
+                aes(x = estimator_name, y = margin)) +
+    geom_boxplot(alpha = 0.2) +
+    geom_hline(yintercept = mean(outcome)*100) +
+    theme_bw() +
+    xlab("") +
+    ylab("Modeled Vote Margin") +
+    annotate(geom = "text", x = 0.85, y = mean(outcome)*100 +0.25, size = 2.7, angle = 90,
+             label = "True Target\nPopulation\nMargin", hjust = 0) +
+    ggtitle(paste0("Non-linear Model R2=", round(R2_outcome,2)," ", pass_sims," sims Average n_samp =", round(mean(est$n)))) +
+    theme(panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+gg_paper_dat = plot_lasso_margin_r5 %>% 
+                              filter(!(estimator %in% c("kpop_conv", 
+                                                      "hayek_truth",
+                                                      "hayek",
+                                                      #"kpop_demos",
+                                                      #"kpop_demos_wedu",
+                                                      #"kpop_all"
+                                                      "kpop_mf"))) 
+gg_out_r5_paper =  ggplot(data = gg_paper_dat,
+                aes(x = estimator_name, y = margin)) +
+    geom_boxplot(alpha = 0.2) +
+    geom_hline(yintercept = mean(outcome)*100) +
+    theme_bw() +
+    xlab("") +
+    ylab("Modeled Vote Margin") +
+    annotate(geom = "text", x = 0.85, y = mean(outcome)*100 +0.25, size = 2.7, angle = 90,
+             label = "True Target\nPopulation\nMargin", hjust = 0) +
+    theme(panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Bias Table
+table_r5 = plot_lasso_margin_r5 %>% 
+    mutate(estimator_name = gsub("\n", " ", estimator_name)) %>%
+    group_by(estimator_name) %>%
+    summarize(
+        Bias = mean(margin - margin_sim, na.rm = T),
+        #SE_boot= sd(margin),
+        MSE = mean((margin - margin_sim)^2, na.rm = T)
+    ) %>% arrange(-MSE) # %>% arrange(-abs(Bias))
+
+dplyr_sux = table_r5 %>% filter(estimator_name == "Unweighted") %>% dplyr::select(Bias) %>% pull()
+table_r5 = table_r5 %>% mutate("Bias Reduction" = 1- abs(Bias) / abs(dplyr_sux))
+table_r5 = as.data.frame(table_r5)
+rownames(table_r5) = table_r5$estimator_name
+table_r5 = table_r5[,-1]
+
+#SE coverage
+SE_coverage = all_SE_coverage(sims, truth = mean(outcome), adjust_bias = T, drop_NA = T)
+SE_coverage = SE_coverage$coverage
+r5_emp_SEs = suppressWarnings(empirical_SEs(sims = sims, na_rm = T))
+
+```
+
+
+```{r non_lin_res_race_r55_inter, echo = F, warnings = F}
+drop_methods = "Hayek|converged"
+table_r5 = table_r5[!grepl(drop_methods, rownames(table_r5)), ] 
+rnames = rownames(table_r5)
+rnames = gsub("  ", " ", rnames)
+rnames= gsub("true selection model", "(true)", rnames)
+rnames = gsub("Horvitz-Thompson","Horvitz-Thompson (true)", rnames)
+rownames(table_r5) = rnames
+#order by chad: unweighted, mean calib, kpop, trues
+order = c(grep("Unweighted", rnames),
+          grep("mean calibration (?!\\(t)", rnames, perl = T),
+          grep("kpop", rnames),
+          grep("Horvitz", rnames), 
+          grep("post", rnames), 
+          grep("mean calibration \\(true", rnames))
+          
+          
+kable(table_r5[order, ], format = "latex", booktabs = T, digits = 3,
+      col.names = c("Bias (p.p.)", "MSE", "Abs Bias Reduction"),
+      caption = "Simulation Results (arranged by MSE)") %>%
+  kable_styling(latex_options = "hold_position")
+
+
+```
+
+
+### Box Plot of Estimates by Method
+
+To see these results visually, we can examine a box plot.
+
+```{r echo=F, warning = F, fig.width=8, fig.height=6}
+#includes Hayek
+#gg_out_r5
+gg_out_r5_paper
+```
+
+### Standard Errors \label{sims:SEs}
+
+The following table present both the empirical standard errors across a number of estimators that are reviewed and can be easily referenced in Kott, Phillip S. "Calibration weighting in survey sampling." Wiley Interdisciplinary Reviews: Computational Statistics 8.1 (2016): 39-53. These include including SEs that assume fixed weights, SEs that us linearization variance estimation (eqn 15), and SEs that assume a quasi-probability sampling process (eqn 14).
+
+```{r SEs, echo = F}
+emp_SE_out = round(r5_emp_SEs$emp_SEs[,grepl("kpop", colnames(r5_emp_SEs$emp_SEs))]*100,3)
+rownames(emp_SE_out) = gsub("_", " ", rownames(emp_SE_out))
+rownames(emp_SE_out)[nrow(emp_SE_out)] = "sd(y hat)"
+#take out Chad's SE estimator
+emp_SE_out = emp_SE_out[-which(rownames(emp_SE_out) == "SE chad"), ]
+#drop Kpop+ebal convergence
+emp_SE_out= emp_SE_out[, !grepl( "conv",colnames(emp_SE_out))]
+#take out svy package SEs
+emp_SE_out = emp_SE_out[-which(rownames(emp_SE_out) == "SE SVY"), ]
+
+pass_sims = nrow(est)
+colnames(emp_SE_out) = linebreak(c("kpop", "kpop+mf\n(demos)", "kpop+mf\n(d+edu)", "kpop+mf\n(all)"))
+kable(emp_SE_out, 
+      format = "latex", booktabs = T, escape = F, 
+      caption = paste("Empirical SE Results \\textbf{in Percent} for kpop Methods", 
+                          pass_sims, "sims $R^2$ on Outcome = ", round(R2_outcome, 3))) %>%
+  kable_styling(latex_options = "hold_position")
+
+```
+
+Next, we evaluate the coverage of these various SE estimators and see all have about nominal or higher coverage.
+
+```{r coverage, echo = F}
+SE_coverage_out = round(SE_coverage[-5, grepl("kpop", colnames(SE_coverage))], 3)
+rownames(SE_coverage_out) = gsub("_", " ", rownames(SE_coverage_out))
+SE_coverage_out = SE_coverage_out[-which(rownames(SE_coverage_out) == "SE chad"), ]
+SE_coverage_out= SE_coverage_out[, !grepl( "conv",colnames(SE_coverage_out))]
+
+
+pass_sims = nrow(est)
+clean_colnames = linebreak(c("kpop", "kpop+mf\n(demos)", "kpop+mf\n(d+edu)", "kpop+mf\n(all)"))
+kable(SE_coverage_out, format = "latex", 
+      booktabs = T,  escape = F, 
+      col.names = clean_colnames,
+          caption = paste("Bias-Adjusted SE Coverage Results for kpop Methods", 
+                          pass_sims, "sims $R^2$ on Outcome = ", round(R2_outcome, 3))) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+
+### Weights Diagnostics
+
+The following table shows the average moments of the weights by method across 1000 simulations. Note that \textit{"Effective SS"} refers to the effective sample size calculated using Kish's expression $\frac{\left(\sum_i w_i\right)^2}{\sum_i w_i^2}$, but is not well referenced against a set sample size since we this varied across simulutions because we used bernoulli draws. The average sample size should be $\sum(p(S=1))$ (printed below). \textit{"No. Units to 90\% Sum of Total"} is the number of units required to sum to $90%$ of the total sum of the weights when weights are ordered from largest to smallest. In other words, summing from the largest weights to the smallest, we require this number of units to get to $90%$ of the total sum of the weights.
+
+```{r, eval =F, echo = F}
+cat("sum(p(S=1)) is:", sum(p_include), "empirically, our simulated samples have average n:", mean(est$n))
+```
+
+```{r weights, echo = F, cache = T}
+weights <- sims[3]$weights
+b_vec = unique(weights %>% bind_rows() %>% dplyr::select(b) %>% pull())
+#for each sim: get weights summary 
+# a bit time consuming
+for(i in 1:length(b_vec)) {
+    if(i == 1) {
+        summary_w = NULL
+    }
+     weights_i <- weights %>% filter(b == b_vec[i]) %>% select(-b)
+     nrow(weights_i) == est[1,"n"]
+     n_eff <- apply(weights_i, 2, function(x) {sum(x)^2 / sum(x^2) })
+     sorted <- apply(weights_i, 2, function(x) sort(x, decreasing =T))
+     #some stupid nonsense 
+    if(n_distinct(round(colSums(sorted), 6 )) != 1 || sum(round(colSums(sorted),6) != nrow(weights_i)) != 0) {
+        stop("Weights do not sum to n_samp for all methods! b=",nsim[[1]]$b )
+    } else {
+        n_samp = unique(round(colSums(sorted), 6 ))
+    }
+    sum_90perc <- matrix(NA, ncol(sorted), nrow =1 )
+    #old school nested loop, but it's slow so let's go backward
+    for(j in 1:ncol(sorted)) {
+        for(k in nrow(sorted):1) {
+            #cat("i=", i, "sum=", sum(sorted[c(1:i), j]), "\n")
+            if( sum(sorted[c(1:k), j]) <.9*n_samp) {
+                #having the stop index be how many units we need to be just over the 90% line
+                #that means we stop at the first unit to get us under the 90% line, we need to add one to
+                sum_90perc[1,j] = k+1
+                #cat("stopping at", i)
+                break
+            }
+        }
+    }
+    summary_w <- rbind(summary_w, data.frame(nsim = which(b_vec == b_vec[i]),
+                                      Estimator = c("kpop", "kpop (conv)",
+                                                    "kpop+mf (demos)", 
+                                                    "kpop+mf (d+edu)", 
+                                                    "kpop+mf (all)"),
+                                       Variance = apply(weights_i, 2, var), 
+                                       Max = apply(weights_i, 2, max),
+                                       Min = apply(weights_i, 2, min),
+                                       IQR = apply(weights_i, 2, IQR),
+                                       Effective_SS = n_eff,
+                                       sum_90perc = as.numeric(sum_90perc), stringsAsFactors = F))
+    
+}
+#now get overall summary just using group_by
+final_sum = summary_w %>% group_by(Estimator) %>% summarise(across(Variance:sum_90perc, ~ mean(.x)))
+
+#take out kpop_conv
+final_sum = final_sum[-which(final_sum$Estimator == "kpop (conv)"),]
+#move to amf and drop mf all
+all_bottom = which(grepl("all", final_sum$Estimator ))
+final_sum = rbind(final_sum[-all_bottom,], final_sum[all_bottom, , drop = F])
+
+colnames(final_sum) <- linebreak(c("Estimator", "Variance", "Max", "Min", "IQR", "Effective SS\n(Kish)",
+                    "No. Units to 90\\%\nSum of Total")) 
+
+
+pass_sims = nrow(est)
+kable(final_sum, digits = 3, format = "latex", booktabs = T, escape = F,
+                       caption = paste("Average Moments of Weights by kpop Method across", pass_sims , "simulations")) %>% kable_styling(latex_options = "hold_position")
+
+```
+
+
+
+### Dimensions of K
+
+```{r, echo = F}
+k_avg = cbind(k_avg = colMeans(est[,grepl("numdims", colnames(est))]),
+              k_sd = apply(est[,grepl("numdims", colnames(est))],2, sd))
+
+rownames(k_avg) =  c("kpop", "kpop+conv", "kpop+mf (demos)", "kpop+mf (demos+edu)", "kpop+mf (all)")
+drop_methods = "conv"
+
+k_avg = k_avg[!grepl(drop_methods, rownames(k_avg)), ] 
+colnames(k_avg) = c("Average", "SD")
+kable(k_avg,3, format = "latex", booktabs = T,
+                       caption = paste("Average Dimensions of K w/ R2=",
+                      round(R2_outcome,2), "Outcome Model") )%>% kable_styling(latex_options = "hold_position")
+
+```
+
+
+
+
